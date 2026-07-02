@@ -8,7 +8,7 @@ makedocs(;
     authors="AntonOresten <antonoresten@proton.me> and contributors",
     sitename="cuBLASLt.jl",
     format=Documenter.HTML(;
-        canonical="https://jool-space.github.io/cuBLASLt.jl",
+        canonical="https://docs.jool.space/cuBLASLt.jl",
         edit_link="main",
         assets=String[],
     ),
@@ -19,5 +19,7 @@ makedocs(;
 
 deploydocs(;
     repo="github.com/jool-space/cuBLASLt.jl",
+    deploy_repo="github.com/jool-space/docs",
     devbranch="main",
+    dirname="cuBLASLt.jl"
 )
