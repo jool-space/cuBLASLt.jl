@@ -170,8 +170,30 @@ function MatmulPlan(;
 
         res = Vector{cublasLtMatmulHeuristicResult_t}(undef, 1)
         cnt = Ref{Cint}(0)
-        cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
-                                       prefref[], Cint(1), res, cnt)
+        if modeA !== nothing || modeB !== nothing
+            # cuBLASLt validates scale modes at heuristic time: a block-scale
+            # mode whose scale pointer is still NULL is rejected with
+            # CUBLAS_STATUS_INVALID_VALUE (NULL means "scale = 1", which only
+            # exists for tensor-wide scaling). The real pointers are matmul!
+            # arguments, so aim the descriptor at a throwaway buffer for this
+            # one call; matmul! re-points the descriptor before every launch.
+            placeholder = CuArray{UInt8}(undef, 16)  # scale pointers must be 16B-aligned
+            modeA === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, ltptr(placeholder))
+            modeB === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, ltptr(placeholder))
+            GC.@preserve placeholder begin
+                cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
+                                               prefref[], Cint(1), res, cnt)
+            end
+            modeA === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, CU_NULL)
+            modeB === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, CU_NULL)
+        else
+            cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
+                                           prefref[], Cint(1), res, cnt)
+        end
         if cnt[] == 0 || res[1].state != CUBLAS_STATUS_SUCCESS
             throw(ArgumentError(
                 "cuBLASLt found no algorithm for " *

@@ -8,7 +8,7 @@ module cuBLASLt
 # and plan caching. Everything that affects algorithm selection lives in a
 # `MatmulPlan`; everything resolved at execution time is a `matmul!` argument.
 
-using CUDACore: CUDACore, CuArray, CuContext, CuPtr, cudaDataType,
+using CUDACore: CUDACore, CuArray, CuContext, CuPtr, CU_NULL, cudaDataType,
                 StridedCuMatrix, StridedCuVecOrMat
 
 using cuBLAS: cublasStatus_t, CUBLAS_STATUS_SUCCESS,
