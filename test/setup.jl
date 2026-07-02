@@ -1,5 +1,6 @@
 # Shared bindings loaded into every test worker via runtests.jl's `init_code`.
 using cuBLASLt
+using cuBLASLt: MatmulPlan, plan_matmul, matmul!
 using CUDACore
 using CUDACore: cudaDataType
 using cuBLAS: CUBLASError

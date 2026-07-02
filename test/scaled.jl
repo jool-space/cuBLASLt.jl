@@ -30,10 +30,15 @@ block_scales(byte::UInt8, outer, inner) =
         A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
         plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
                           typeD = Float32, transA = 'T', lda = K, ldb = K,
-                          scaleA = :scalar_f32, scaleB = :scalar_f32)
+                          scale_modeA = :scalar_f32, scale_modeB = :scalar_f32)
         dD = CUDACore.zeros(Float32, M, N)
         sA, sB = CuArray([2.0f0]), CuArray([0.5f0])
-        matmul!(dD, CuArray(A), CuArray(B), plan; scaleA = sA, scaleB = sB)
+        plan(dD, CuArray(A), CuArray(B); scaleA = sA, scaleB = sB)
+        @test Array(dD) ≈ 2.0f0 * 0.5f0 * (Float64.(A)' * Float64.(B)) rtol = 1e-3
+
+        # planless: length-1 Float32 scale prototypes infer :scalar_f32
+        fill!(dD, 0)
+        matmul!(dD, CuArray(A), CuArray(B); transA = 'T', scaleA = sA, scaleB = sB)
         @test Array(dD) ≈ 2.0f0 * 0.5f0 * (Float64.(A)' * Float64.(B)) rtol = 1e-3
     end
 end
@@ -48,7 +53,7 @@ end
             plan = MatmulPlan(; M, N, K, typeA = TA, typeB = TB, typeD = Float32,
                               transA = 'T', lda = K, ldb = K)
             dD = CUDACore.zeros(Float32, M, N)
-            matmul!(dD, CuArray(A), CuArray(B), plan)
+            plan(dD, CuArray(A), CuArray(B))
             @test Array(dD) ≈ Float64.(A)' * Float64.(B) rtol = 1e-3
         end
     end
@@ -71,12 +76,12 @@ end
         A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
         plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
                           typeD = Float32, transA = 'T', lda = K, ldb = K,
-                          scaleA = :vec32_ue8m0, scaleB = :vec32_ue8m0)
+                          scale_modeA = :vec32_ue8m0, scale_modeB = :vec32_ue8m0)
         dD = CUDACore.zeros(Float32, M, N)
         # E8M0 byte 127 = 2^0; one scale per 32 K-elements per output row/col
         sA = block_scales(0x7f, M, K ÷ 32)
         sB = block_scales(0x7f, N, K ÷ 32)
-        matmul!(dD, CuArray(A), CuArray(B), plan; scaleA = sA, scaleB = sB)
+        plan(dD, CuArray(A), CuArray(B); scaleA = sA, scaleB = sB)
         @test Array(dD) ≈ Float64.(A)' * Float64.(B) rtol = 1e-4
     end
 end
@@ -90,14 +95,14 @@ end
         R_4F_E2M1 = convert(cudaDataType, Float4_E2M1FN)
         plan = MatmulPlan(; M, N, K, typeA = R_4F_E2M1, typeB = R_4F_E2M1,
                           typeD = Float32, transA = 'T', lda = K, ldb = K,
-                          scaleA = :vec16_ue4m3, scaleB = :vec16_ue4m3)
+                          scale_modeA = :vec16_ue4m3, scale_modeB = :vec16_ue4m3)
         dA = fill!(CuArray{UInt8}(undef, (K ÷ 2) * M), 0x22)
         dB = fill!(CuArray{UInt8}(undef, (K ÷ 2) * N), 0x22)
         # UE4M3 byte 0x38 = 1.0; one scale per 16 K-elements
         sA = block_scales(0x38, M, K ÷ 16)
         sB = block_scales(0x38, N, K ÷ 16)
         dD = CUDACore.zeros(Float32, M, N)
-        matmul!(dD, dA, dB, plan; scaleA = sA, scaleB = sB)
+        plan(dD, dA, dB; scaleA = sA, scaleB = sB)
         @test Array(dD) ≈ fill(Float32(K), M, N)
     end
 end

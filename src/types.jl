@@ -26,7 +26,7 @@ function compute_type(s::Symbol)
     return COMPUTE_TYPES[s]
 end
 
-function scale_mode(s::Symbol)
+function scale_mode_enum(s::Symbol)
     s === :none && return nothing
     haskey(SCALE_MODES, s) ||
         throw(ArgumentError("unknown scale mode :$s; expected :none or one of $(symbol_list(SCALE_MODES))"))
@@ -65,9 +65,9 @@ function require_version(v::VersionNumber, what)
         "Upgrade the CUDA toolkit/runtime to use this feature."))
 end
 
-function check_feature_support(compute::Symbol, scaleA::Symbol, scaleB::Symbol)
+function check_feature_support(compute::Symbol, scale_modeA::Symbol, scale_modeB::Symbol)
     compute === :bf16x9 && require_version(v"12.9", "compute type :bf16x9 (BF16x9 FP32 emulation)")
-    for s in (scaleA, scaleB)
+    for s in (scale_modeA, scale_modeB)
         # SCALAR_32F predates the scale-mode attribute (it is the implicit default
         # for FP8 scale pointers), so only block modes hard-require 12.8.
         s in (:none, :scalar_f32) ||

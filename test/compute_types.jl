@@ -13,7 +13,7 @@ function compute_case(compute, TA, TD; rtol, kwargs...)
         @info "skipping compute = :$compute (no algorithm on this GPU)"
         return
     end
-    matmul!(dD, dA, dB, plan)
+    plan(dD, dA, dB)
     @test Float64.(Array(dD)) ≈ Float64.(A) * Float64.(B) rtol = rtol
 end
 

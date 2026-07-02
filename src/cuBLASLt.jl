@@ -6,10 +6,13 @@ module cuBLASLt
 #
 # with per-call compute types, block-scaled narrow types, strided batching,
 # and plan caching. Everything that affects algorithm selection lives in a
-# `MatmulPlan`; everything resolved at execution time is a `matmul!` argument.
+# `MatmulPlan`; everything resolved at execution time is an argument of the
+# plan application `plan(D, A, B; ...)`. `plan_matmul(D, A, B; ...)` derives a
+# plan from prototype arguments; `matmul!` composes the two through a cache.
 
-using CUDACore: CUDACore, CuArray, CuContext, CuPtr, CU_NULL, cudaDataType,
-                StridedCuMatrix, StridedCuVecOrMat
+using CUDACore: CUDACore, CuArray, CuContext, CuPtr, CU_NULL, cudaDataType
+
+using LinearAlgebra: Adjoint, Transpose
 
 using cuBLAS: cublasStatus_t, CUBLAS_STATUS_SUCCESS,
     cublasOperation_t, CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C,
@@ -43,9 +46,8 @@ using cuBLAS: cublasStatus_t, CUBLAS_STATUS_SUCCESS,
     cublasLtMatmulAlgo_t, cublasLtMatmulHeuristicResult_t,
     cublasLtMatmulAlgoGetHeuristic, cublasLtMatmul
 
-export MatmulPlan, matmul!
-
-public handle, ltptr, version, empty_plan_cache!
+public MatmulPlan, plan_matmul, matmul!
+public handle, ltptr, ltdata, ltscale, scale_mode, version, empty_plan_cache!
 
 include("types.jl")
 include("handle.jl")

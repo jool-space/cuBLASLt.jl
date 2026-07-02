@@ -13,6 +13,8 @@ const NULL_DESC = cublasLtMatmulDesc_t(C_NULL)
 const NULL_LAYOUT = cublasLtMatrixLayout_t(C_NULL)
 const NULL_PREF = cublasLtMatmulPreference_t(C_NULL)
 
+const DEFAULT_MAX_WORKSPACE = 32 << 20
+
 """
     MatmulPlan(; M, N, K, typeA, typeB, typeD, kwargs...)
 
@@ -31,8 +33,9 @@ The type parameter is the element type of `α`/`β` (`Float32`, or `Float16`/
   - `batch = 1`: strided-batch count; `strideA`/`strideB`/`strideC`/`strideD`
     are element strides between batch entries (default: densely packed).
   - `compute = :f32`: one of $(symbol_list(COMPUTE_TYPES)).
-  - `scaleA`, `scaleB`: scale *mode* (affects algorithm choice); `:none` or one
-    of $(symbol_list(SCALE_MODES)). The scale *pointers* are `matmul!` arguments.
+  - `scale_modeA`, `scale_modeB`: scale *mode* (affects algorithm choice);
+    `:none` or one of $(symbol_list(SCALE_MODES)). The scale *arrays* are
+    apply-time arguments (`scaleA`/`scaleB`).
   - `pointer_mode = :host`: `:host` (α/β are `Number`s) or `:device`
     (α/β are 0-dimensional `CuArray`s, read at execution time; graph-capture safe).
   - `alignA`, `alignB`, `alignC`, `alignD` (default 256): minimum byte alignment
@@ -62,8 +65,8 @@ mutable struct MatmulPlan{T}
     const typeC::cudaDataType
     const typeD::cudaDataType
     const compute::Symbol
-    const scaleA::Symbol
-    const scaleB::Symbol
+    const scale_modeA::Symbol
+    const scale_modeB::Symbol
     const pointer_mode::Symbol
     const alignA::Int
     const alignB::Int
@@ -96,12 +99,12 @@ function MatmulPlan(;
         strideC::Integer = ldc * N,
         strideD::Integer = ldd * N,
         compute::Symbol = :f32,
-        scaleA::Symbol = :none, scaleB::Symbol = :none,
+        scale_modeA::Symbol = :none, scale_modeB::Symbol = :none,
         pointer_mode::Symbol = :host,
         alignA::Integer = 256, alignB::Integer = 256,
         alignC::Integer = 256, alignD::Integer = 256,
         epilogue = nothing,
-        max_workspace::Integer = 32 << 20)
+        max_workspace::Integer = DEFAULT_MAX_WORKSPACE)
     epilogue === nothing ||
         throw(ArgumentError("epilogues are reserved for v0.2; pass epilogue = nothing"))
     M >= 1 && N >= 1 && K >= 1 ||
@@ -117,8 +120,8 @@ function MatmulPlan(;
 
     opA, opB = operation(transA), operation(transB)
     ct = compute_type(compute)
-    modeA, modeB = scale_mode(scaleA), scale_mode(scaleB)
-    check_feature_support(compute, scaleA, scaleB)
+    modeA, modeB = scale_mode_enum(scale_modeA), scale_mode_enum(scale_modeB)
+    check_feature_support(compute, scale_modeA, scale_modeB)
 
     scaleT = scale_eltype(compute)
     dtA, dtB = to_datatype(typeA), to_datatype(typeB)
@@ -198,7 +201,7 @@ function MatmulPlan(;
             throw(ArgumentError(
                 "cuBLASLt found no algorithm for " *
                 config_string(M, N, K, batch, transA, transB, dtA, dtB, dtC, dtD,
-                              compute, scaleA, scaleB) *
+                              compute, scale_modeA, scale_modeB) *
                 ". This type/scale-mode combination is likely unsupported on " *
                 "$(CUDACore.name(CUDACore.device())) with cuBLASLt $(version())."))
         end
@@ -207,7 +210,7 @@ function MatmulPlan(;
                                   res[1].algo, Int(res[1].workspaceSize),
                                   M, N, K, batch, transA, transB,
                                   dtA, dtB, dtC, dtD,
-                                  compute, scaleA, scaleB, pointer_mode,
+                                  compute, scale_modeA, scale_modeB, pointer_mode,
                                   Int(alignA), Int(alignB), Int(alignC), Int(alignD),
                                   ReentrantLock())
         descref[] = NULL_DESC  # ownership transferred; disarm the catch block
@@ -223,13 +226,13 @@ function MatmulPlan(;
 end
 
 function config_string(M, N, K, batch, transA, transB, dtA, dtB, dtC, dtD,
-                       compute, scaleA, scaleB)
+                       compute, scale_modeA, scale_modeB)
     str = "$(M)×$(K)$(transA == 'N' ? "" : "ᵀ") ⋅ $(K)×$(N)$(transB == 'N' ? "" : "ᵀ")" *
           " → $(M)×$(N)"
     batch > 1 && (str *= " ×$batch")
     str *= " [$dtA ⋅ $dtB + $dtC → $dtD, compute $compute"
-    scaleA === :none || (str *= ", scaleA $scaleA")
-    scaleB === :none || (str *= ", scaleB $scaleB")
+    scale_modeA === :none || (str *= ", A scales $scale_modeA")
+    scale_modeB === :none || (str *= ", B scales $scale_modeB")
     return str * "]"
 end
 
@@ -237,7 +240,7 @@ function Base.show(io::IO, plan::MatmulPlan)
     print(io, "MatmulPlan(",
           config_string(plan.M, plan.N, plan.K, plan.batch, plan.transA, plan.transB,
                         plan.typeA, plan.typeB, plan.typeC, plan.typeD,
-                        plan.compute, plan.scaleA, plan.scaleB))
+                        plan.compute, plan.scale_modeA, plan.scale_modeB))
     plan.pointer_mode === :device && print(io, ", device α/β")
     print(io, ", workspace ", Base.format_bytes(plan.workspace_size), ")")
 end

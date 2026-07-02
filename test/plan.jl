@@ -14,7 +14,7 @@ end
     kw = (; M = 32, N = 16, K = 64, typeA = Float32, typeB = Float32, typeD = Float32)
 
     @test_throws ArgumentError MatmulPlan(; kw..., compute = :f37)
-    @test_throws ArgumentError MatmulPlan(; kw..., scaleA = :vec42_bogus)
+    @test_throws ArgumentError MatmulPlan(; kw..., scale_modeA = :vec42_bogus)
     @test_throws ArgumentError MatmulPlan(; kw..., transA = 'X')
     @test_throws ArgumentError MatmulPlan(; kw..., pointer_mode = :remote)
     @test_throws ArgumentError MatmulPlan(; kw..., epilogue = :relu)
@@ -24,34 +24,80 @@ end
     @test_throws ArgumentError MatmulPlan(; kw..., typeA = String)
 end
 
-@testset "matmul! argument validation" begin
+@testset "plan_matmul derivation" begin
+    M, N, K = 32, 16, 24
+    dA, dB = CuArray(rand(Float32, M, K)), CuArray(rand(Float32, K, N))
+    dD = CUDACore.zeros(Float32, M, N)
+
+    plan = plan_matmul(dD, dA, dB)
+    @test plan isa MatmulPlan{Float32}
+    @test (plan.M, plan.N, plan.K) == (M, N, K)
+    @test plan.transA == 'N' && plan.transB == 'N'
+    @test plan.pointer_mode === :host
+
+    # Transpose/Adjoint wrappers set the orientation
+    dAt = CuArray(rand(Float32, K, M))
+    @test plan_matmul(dD, transpose(dAt), dB).transA == 'T'
+    @test plan_matmul(dD, dAt', dB).transA == 'C'
+    # an agreeing transA kwarg is redundant but fine; a conflicting one throws
+    @test plan_matmul(dD, transpose(dAt), dB; transA = 'T').transA == 'T'
+    @test_throws ArgumentError plan_matmul(dD, transpose(dAt), dB; transA = 'N')
+
+    # α/β prototypes set the pointer mode
+    plan_dev = plan_matmul(dD, dA, dB; α = device_scalar(1.0f0),
+                           β = device_scalar(0.0f0))
+    @test plan_dev.pointer_mode === :device
+    @test_throws ArgumentError plan_matmul(dD, dA, dB; α = device_scalar(1.0f0),
+                                           β = 0.0f0)
+
+    # a workspace prototype caps the heuristic's workspace budget
+    ws = CuArray{UInt8}(undef, 1 << 20)
+    @test plan_matmul(dD, dA, dB; workspace = ws).workspace_size <= sizeof(ws)
+
+    # kws override derived plan kwargs
+    @test plan_matmul(dD, dA, dB; compute = :tf32).compute === :tf32
+
+    # scale arrays that don't pin down a mode demand an explicit one
+    # (length-1 Float32 → :scalar_f32 inference is exercised in scaled.jl)
+    @test_throws ArgumentError plan_matmul(dD, dA, dB;
+                                           scaleA = CUDACore.zeros(Float32, 4, 4))
+    @test_throws ArgumentError plan_matmul(dD, dA, dB;
+                                           scaleA = CUDACore.zeros(Float16, 1))
+
+    @test_throws DimensionMismatch plan_matmul(dD, dB, dA)
+end
+
+@testset "plan application argument validation" begin
     plan = MatmulPlan(; M = 8, N = 8, K = 8, typeA = Float32, typeB = Float32,
                       typeD = Float32)
     A, B, D = (CuArray(rand(Float32, 8, 8)) for _ in 1:3)
 
     # scale pointers only when the plan has a scale mode
-    @test_throws ArgumentError matmul!(D, A, B, plan; scaleA = A)
+    @test_throws ArgumentError plan(D, A, B; scaleA = A)
 
     # α/β must match the plan's pointer mode
-    @test_throws ArgumentError matmul!(D, A, B, plan; α = device_scalar(1.0f0),
-                                       β = device_scalar(0.0f0))
+    @test_throws ArgumentError plan(D, A, B; α = device_scalar(1.0f0),
+                                    β = device_scalar(0.0f0))
 
     # undersized explicit workspace
     if plan.workspace_size > 0
-        @test_throws ArgumentError matmul!(D, A, B, plan;
-                                           workspace = CuArray{UInt8}(undef, 1))
+        @test_throws ArgumentError plan(D, A, B;
+                                        workspace = CuArray{UInt8}(undef, 1))
     end
 
     # operands less aligned than the plan promised the heuristic
     P = CuArray(rand(Float32, 9, 8))
-    @test_throws ArgumentError matmul!(D, view(P, 2:9, 1:8), B, plan)
+    @test_throws ArgumentError plan(D, view(P, 2:9, 1:8), B)
+
+    # a wrapped operand must agree with the plan's orientation
+    @test_throws ArgumentError plan(D, transpose(A), B)
 
     dev_plan = MatmulPlan(; M = 8, N = 8, K = 8, typeA = Float32, typeB = Float32,
                           typeD = Float32, pointer_mode = :device)
-    @test_throws ArgumentError matmul!(D, A, B, dev_plan; α = 1.0f0, β = 0.0f0)
+    @test_throws ArgumentError dev_plan(D, A, B; α = 1.0f0, β = 0.0f0)
     # eltype of device scalars must match the plan's scale type
-    @test_throws ArgumentError matmul!(D, A, B, dev_plan; α = device_scalar(1.0),
-                                       β = device_scalar(0.0))
+    @test_throws ArgumentError dev_plan(D, A, B; α = device_scalar(1.0),
+                                        β = device_scalar(0.0))
 end
 
 @testset "plan cache" begin

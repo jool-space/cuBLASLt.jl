@@ -10,7 +10,7 @@ Random.seed!(1)
 
         plan = MatmulPlan(; M, N, K, typeA = Float32, typeB = Float32,
                           typeD = Float32, transA, transB)
-        matmul!(dD, dA, dB, plan)
+        plan(dD, dA, dB)
         @test Array(dD) ≈ matmul_ref(A, B, transA, transB, 1, 0, zeros(Float32, M, N)) rtol = 1e-5
     end
 end
@@ -22,14 +22,14 @@ end
     dD = CUDACore.zeros(Float32, M, N)
 
     plan = MatmulPlan(; M, N, K, typeA = Float32, typeB = Float32, typeD = Float32)
-    matmul!(dD, dA, dB, plan; α = 2.0f0, β = 0.5f0, C = dC)
+    plan(dD, dA, dB; α = 2.0f0, β = 0.5f0, C = dC)
     @test Array(dD) ≈ matmul_ref(A, B, 'N', 'N', 2, 0.5, C) rtol = 1e-5
     @test Array(dC) ≈ C  # C is read-only when D does not alias it
 
     # in-place accumulation, D aliasing C
     D0 = rand(Float32, M, N)
     dD2 = CuArray(D0)
-    matmul!(dD2, dA, dB, plan; α = 1.0f0, β = 1.0f0)
+    plan(dD2, dA, dB; α = 1.0f0, β = 1.0f0)
     @test Array(dD2) ≈ matmul_ref(A, B, 'N', 'N', 1, 1, D0) rtol = 1e-5
 end
 
@@ -41,7 +41,7 @@ end
 
     plan = MatmulPlan(; M, N, K, typeA = Float32, typeB = Float32, typeD = Float32,
                       pointer_mode = :device)
-    matmul!(dD, dA, dB, plan; α = device_scalar(3.0f0), β = device_scalar(0.0f0))
+    plan(dD, dA, dB; α = device_scalar(3.0f0), β = device_scalar(0.0f0))
     @test Array(dD) ≈ matmul_ref(A, B, 'N', 'N', 3, 0, zeros(Float32, M, N)) rtol = 1e-5
 end
 
@@ -53,7 +53,7 @@ end
 
     plan = MatmulPlan(; M, N, K, typeA = Float32, typeB = Float32, typeD = Float32,
                       batch)
-    matmul!(dD, dA, dB, plan)
+    plan(dD, dA, dB)
     D = Array(dD)
     for b in 1:batch
         @test D[:, :, b] ≈ Float32.(Float64.(A[:, :, b]) * Float64.(B[:, :, b])) rtol = 1e-5
@@ -69,7 +69,7 @@ end
     plan = MatmulPlan(; M, N, K, typeA = Float32, typeB = Float32, typeD = Float32)
     ws = CuArray{UInt8}(undef, plan.workspace_size)
     for _ in 1:3
-        matmul!(dD, dA, dB, plan; workspace = ws)
+        plan(dD, dA, dB; workspace = ws)
     end
     @test Array(dD) ≈ Float32.(Float64.(A) * Float64.(B)) rtol = 1e-5
 end
@@ -83,6 +83,10 @@ end
     matmul!(dD, dA, dB; transA = 'T', α = 2.0f0, β = 1.0f0, C = dC)
     @test Array(dD) ≈ matmul_ref(A, B, 'T', 'N', 2, 1, C) rtol = 1e-5
 
+    # Transpose wrappers instead of the transA kwarg
+    matmul!(dD, transpose(dA), dB; β = 0.0f0)
+    @test Array(dD) ≈ matmul_ref(A, B, 'T', 'N', 1, 0, zeros(Float32, M, N)) rtol = 1e-5
+
     # views (non-dense leading dimension)
     P = CuArray(rand(Float32, 2M, K))
     vA = view(P, 1:M, 1:K)
@@ -93,6 +97,22 @@ end
     @test_throws DimensionMismatch matmul!(dD, dB, dA)
     @test_throws DimensionMismatch matmul!(dD, dA, dB; transA = 'T',
                                            C = CUDACore.zeros(Float32, M, 2N))
+end
+
+@testset "planless strided batching" begin
+    M, N, K, batch = 16, 24, 32, 3
+    A, B = rand(Float32, M, K, batch), rand(Float32, K, N, batch)
+    dA, dB = CuArray(A), CuArray(B)
+    dD = CUDACore.zeros(Float32, M, N, batch)
+
+    matmul!(dD, dA, dB)
+    D = Array(dD)
+    for b in 1:batch
+        @test D[:, :, b] ≈ Float32.(Float64.(A[:, :, b]) * Float64.(B[:, :, b])) rtol = 1e-5
+    end
+
+    @test_throws DimensionMismatch matmul!(dD, dA,
+                                           CuArray(rand(Float32, K, N, batch + 1)))
 end
 
 @testset "planless with misaligned views" begin
@@ -117,10 +137,10 @@ end
 
     plan = MatmulPlan(; M, N, K, typeA = Float32, typeB = Float32, typeD = Float32)
     ws = CuArray{UInt8}(undef, plan.workspace_size)
-    matmul!(dD, dA, dB, plan; workspace = ws)  # warmup outside capture
+    plan(dD, dA, dB; workspace = ws)  # warmup outside capture
 
     graph = CUDACore.capture(; throw_error = false) do
-        matmul!(dD, dA, dB, plan; workspace = ws)
+        plan(dD, dA, dB; workspace = ws)
     end
     if graph === nothing
         @warn "stream capture unavailable; skipping graph-capture smoke test"
@@ -147,6 +167,6 @@ end
     dD = CUDACore.zeros(Float32, M, N)
 
     plan = MatmulPlan(; M, N, K, typeA = Float16, typeB = Float16, typeD = Float32)
-    matmul!(dD, dA, dB, plan)
+    plan(dD, dA, dB)
     @test Array(dD) ≈ Float32.(Float64.(A) * Float64.(B)) rtol = 1e-3
 end
