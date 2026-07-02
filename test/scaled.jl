@@ -14,13 +14,13 @@ const M, N, K = 64, 32, 128
 fp8_operands(TA, TB) = (TA.(rand(Float32, K, M)), TB.(rand(Float32, K, N)))
 
 @testset "fp8, tensor-wide :scalar_f32" begin
-    A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
-    plan = try_plan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
-                    typeD = Float32, transA = 'T', lda = K, ldb = K,
-                    scaleA = :scalar_f32, scaleB = :scalar_f32)
-    if plan === nothing
-        @info "skipping :scalar_f32 FP8 (unsupported on this GPU)"
+    if CC < v"8.9"
+        @info "skipping :scalar_f32 FP8 (requires CC ≥ 8.9, device is $CC)"
     else
+        A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
+        plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                          typeD = Float32, transA = 'T', lda = K, ldb = K,
+                          scaleA = :scalar_f32, scaleB = :scalar_f32)
         dD = CUDACore.zeros(Float32, M, N)
         sA, sB = CuArray([2.0f0]), CuArray([0.5f0])
         matmul!(dD, CuArray(A), CuArray(B), plan; scaleA = sA, scaleB = sB)
@@ -29,18 +29,18 @@ fp8_operands(TA, TB) = (TA.(rand(Float32, K, M)), TB.(rand(Float32, K, N)))
 end
 
 @testset "fp8, unscaled and mixed element types" begin
-    for (TA, TB) in ((Float8_E4M3FN, Float8_E4M3FN), (Float8_E4M3FN, Float8_E5M2),
-                     (Float8_E5M2, Float8_E4M3FN))
-        A, B = fp8_operands(TA, TB)
-        plan = try_plan(; M, N, K, typeA = TA, typeB = TB, typeD = Float32,
-                        transA = 'T', lda = K, ldb = K)
-        if plan === nothing
-            @info "skipping unscaled $TA × $TB (unsupported on this GPU)"
-            continue
+    if CC < v"8.9"
+        @info "skipping unscaled FP8 (requires CC ≥ 8.9, device is $CC)"
+    else
+        for (TA, TB) in ((Float8_E4M3FN, Float8_E4M3FN), (Float8_E4M3FN, Float8_E5M2),
+                         (Float8_E5M2, Float8_E4M3FN))
+            A, B = fp8_operands(TA, TB)
+            plan = MatmulPlan(; M, N, K, typeA = TA, typeB = TB, typeD = Float32,
+                              transA = 'T', lda = K, ldb = K)
+            dD = CUDACore.zeros(Float32, M, N)
+            matmul!(dD, CuArray(A), CuArray(B), plan)
+            @test Array(dD) ≈ Float64.(A)' * Float64.(B) rtol = 1e-3
         end
-        dD = CUDACore.zeros(Float32, M, N)
-        matmul!(dD, CuArray(A), CuArray(B), plan)
-        @test Array(dD) ≈ Float64.(A)' * Float64.(B) rtol = 1e-3
     end
 end
 
@@ -55,13 +55,13 @@ end
 end
 
 @testset "mxfp8, :vec32_ue8m0" begin
-    A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
-    plan = try_plan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
-                    typeD = Float32, transA = 'T', lda = K, ldb = K,
-                    scaleA = :vec32_ue8m0, scaleB = :vec32_ue8m0)
-    if plan === nothing
-        @info "skipping :vec32_ue8m0 MXFP8 (unsupported on this GPU)"
+    if CC < v"10.0"
+        @info "skipping :vec32_ue8m0 MXFP8 (requires CC ≥ 10.0, device is $CC)"
     else
+        A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
+        plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                          typeD = Float32, transA = 'T', lda = K, ldb = K,
+                          scaleA = :vec32_ue8m0, scaleB = :vec32_ue8m0)
         dD = CUDACore.zeros(Float32, M, N)
         # E8M0 byte 127 = 2^0; one scale per 32 K-elements per output row/col
         sA = fill!(CuArray{UInt8}(undef, (K ÷ 32) * M), 0x7f)
@@ -72,15 +72,15 @@ end
 end
 
 @testset "nvfp4, :vec16_ue4m3" begin
-    # raw-byte NVFP4 payloads: 0x22 packs two E2M1 values of 1.0 per byte, so
-    # op(A)⋅op(B) is all-ones times all-ones and every D entry is exactly K
-    R_4F_E2M1 = convert(cudaDataType, Float4_E2M1FN)
-    plan = try_plan(; M, N, K, typeA = R_4F_E2M1, typeB = R_4F_E2M1,
-                    typeD = Float32, transA = 'T', lda = K, ldb = K,
-                    scaleA = :vec16_ue4m3, scaleB = :vec16_ue4m3)
-    if plan === nothing
-        @info "skipping :vec16_ue4m3 NVFP4 (unsupported on this GPU)"
+    if CC < v"10.0"
+        @info "skipping :vec16_ue4m3 NVFP4 (requires CC ≥ 10.0, device is $CC)"
     else
+        # raw-byte NVFP4 payloads: 0x22 packs two E2M1 values of 1.0 per byte, so
+        # op(A)⋅op(B) is all-ones times all-ones and every D entry is exactly K
+        R_4F_E2M1 = convert(cudaDataType, Float4_E2M1FN)
+        plan = MatmulPlan(; M, N, K, typeA = R_4F_E2M1, typeB = R_4F_E2M1,
+                          typeD = Float32, transA = 'T', lda = K, ldb = K,
+                          scaleA = :vec16_ue4m3, scaleB = :vec16_ue4m3)
         dA = fill!(CuArray{UInt8}(undef, (K ÷ 2) * M), 0x22)
         dB = fill!(CuArray{UInt8}(undef, (K ÷ 2) * N), 0x22)
         # UE4M3 byte 0x38 = 1.0; one scale per 16 K-elements
