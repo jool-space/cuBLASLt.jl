@@ -8,10 +8,20 @@ Random.seed!(3)
 # block scales through a swizzled layout, and constant arrays are
 # swizzle-invariant, so these tests need no swizzle machinery (and no
 # Microscaling dependency). Any test with non-constant scales must swizzle.
+#
+# The swizzled layout stores scales in 128(outer)×4(inner)-entry tiles, and
+# storage must be padded to whole tiles — undersized arrays make cuBLASLt
+# read out of bounds. A constant fill over the padded allocation is both
+# swizzle- and padding-invariant.
 
 const M, N, K = 64, 32, 128
 
 fp8_operands(TA, TB) = (TA.(rand(Float32, K, M)), TB.(rand(Float32, K, N)))
+
+# `outer` is the output dimension (M for A, N for B); `inner` the number of
+# scales along K (K ÷ block size)
+block_scales(byte::UInt8, outer, inner) =
+    fill!(CuArray{UInt8}(undef, 128 * cld(outer, 128) * 4 * cld(inner, 4)), byte)
 
 @testset "fp8, tensor-wide :scalar_f32" begin
     if CC < v"8.9"
@@ -64,8 +74,8 @@ end
                           scaleA = :vec32_ue8m0, scaleB = :vec32_ue8m0)
         dD = CUDACore.zeros(Float32, M, N)
         # E8M0 byte 127 = 2^0; one scale per 32 K-elements per output row/col
-        sA = fill!(CuArray{UInt8}(undef, (K ÷ 32) * M), 0x7f)
-        sB = fill!(CuArray{UInt8}(undef, (K ÷ 32) * N), 0x7f)
+        sA = block_scales(0x7f, M, K ÷ 32)
+        sB = block_scales(0x7f, N, K ÷ 32)
         matmul!(dD, CuArray(A), CuArray(B), plan; scaleA = sA, scaleB = sB)
         @test Array(dD) ≈ Float64.(A)' * Float64.(B) rtol = 1e-4
     end
@@ -84,8 +94,8 @@ end
         dA = fill!(CuArray{UInt8}(undef, (K ÷ 2) * M), 0x22)
         dB = fill!(CuArray{UInt8}(undef, (K ÷ 2) * N), 0x22)
         # UE4M3 byte 0x38 = 1.0; one scale per 16 K-elements
-        sA = fill!(CuArray{UInt8}(undef, (K ÷ 16) * M), 0x38)
-        sB = fill!(CuArray{UInt8}(undef, (K ÷ 16) * N), 0x38)
+        sA = block_scales(0x38, M, K ÷ 16)
+        sB = block_scales(0x38, N, K ÷ 16)
         dD = CUDACore.zeros(Float32, M, N)
         matmul!(dD, dA, dB, plan; scaleA = sA, scaleB = sB)
         @test Array(dD) ≈ fill(Float32(K), M, N)

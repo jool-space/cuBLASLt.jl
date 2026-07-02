@@ -35,9 +35,13 @@ Compute `D = α ⋅ op(A) ⋅ op(B) + β ⋅ C` according to `plan`.
 Operands are anything accepted by [`cuBLASLt.ltptr`](@ref). `α`/`β` are host
 `Number`s (`pointer_mode = :host`) or 0-dimensional `CuArray`s
 (`pointer_mode = :device`). `scaleA`/`scaleB` are device scale arrays, required
-iff the plan's corresponding scale mode is not `:none`. `workspace` is an
-optional preallocated buffer of at least `plan.workspace_size` bytes; by
-default one is allocated from the stream-ordered pool.
+iff the plan's corresponding scale mode is not `:none`. For the block modes
+(`:vec32_ue8m0`, `:vec16_ue4m3`) cuBLASLt reads scales through its tiled
+layout of 128(outer)×4(inner)-entry tiles: data must be swizzled accordingly
+and the allocation padded to whole tiles, or the kernel reads out of bounds.
+`workspace` is an optional preallocated buffer of at least
+`plan.workspace_size` bytes; by default one is allocated from the
+stream-ordered pool.
 """
 function matmul!(D, A, B, plan::MatmulPlan{T};
                  α = true, β = false, C = D,
