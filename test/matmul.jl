@@ -115,6 +115,98 @@ end
                                            CuArray(rand(Float32, K, N, batch + 1)))
 end
 
+@testset "batched orientation via PermutedDimsArray" begin
+    M, N, K, batch = 16, 24, 32, 3
+    A = rand(Float32, K, M, batch)  # stored K-major; logical op(A) slice = Aᵀ
+    B = rand(Float32, K, N, batch)
+    dA, dB = CuArray(A), CuArray(B)
+    dD = CUDACore.zeros(Float32, M, N, batch)
+
+    matmul!(dD, PermutedDimsArray(dA, (2, 1, 3)), dB)
+    D = Array(dD)
+    for b in 1:batch
+        @test D[:, :, b] ≈ Float32.(Float64.(A[:, :, b])' * Float64.(B[:, :, b])) rtol = 1e-5
+    end
+
+    # planned round trip: the wrapper is a prototype too
+    plan = plan_matmul(dD, PermutedDimsArray(dA, (2, 1, 3)), dB)
+    @test plan.transA == 'T'
+    fill!(dD, 0)
+    plan(dD, PermutedDimsArray(dA, (2, 1, 3)), dB)
+    @test Array(dD) ≈ D rtol = 1e-5
+
+    # identity permutation is 'N' and as trusted as a raw array
+    fill!(dD, 0)
+    matmul!(dD, PermutedDimsArray(CuArray(permutedims(A, (2, 1, 3))), (1, 2, 3)), dB)
+    @test Array(dD) ≈ D rtol = 1e-5
+
+    # 2-d analog agrees with transpose()
+    A2, B2 = rand(Float32, K, M), rand(Float32, K, N)
+    dA2, dB2 = CuArray(A2), CuArray(B2)
+    dD2 = CUDACore.zeros(Float32, M, N)
+    matmul!(dD2, PermutedDimsArray(dA2, (2, 1)), dB2)
+    @test Array(dD2) ≈ matmul_ref(A2, B2, 'T', 'N', 1, 0, zeros(Float32, M, N)) rtol = 1e-5
+
+    # permutations that move the batch dim are rejected, not misread
+    @test_throws ArgumentError matmul!(dD, PermutedDimsArray(dA, (2, 3, 1)), dB)
+    @test_throws ArgumentError matmul!(dD, PermutedDimsArray(dA, (1, 3, 2)), dB)
+    # wrapper disagreeing with the plan's orientation
+    dB_mn = CuArray(rand(Float32, M, N, batch))
+    dD_kn = CUDACore.zeros(Float32, K, N, batch)
+    plan_n = plan_matmul(dD_kn, dA, dB_mn)  # 'N': stored K×M slices as-is
+    @test_throws ArgumentError plan_n(dD_kn, PermutedDimsArray(dA, (2, 1, 3)), dB_mn)
+end
+
+@testset "step-range sub-batch views" begin
+    M, N, K = 16, 24, 32
+    A = rand(Float32, M, K, 8)
+    B = rand(Float32, K, N, 4)
+    dA, dB = CuArray(A), CuArray(B)
+    dD = CUDACore.zeros(Float32, M, N, 4)
+
+    # every other slice as input, including an offset start
+    for range in (1:2:8, 2:2:8)
+        fill!(dD, 0)
+        matmul!(dD, view(dA, :, :, range), dB)
+        D = Array(dD)
+        for (i, b) in enumerate(range)
+            @test D[:, :, i] ≈ Float32.(Float64.(A[:, :, b]) * Float64.(B[:, :, i])) rtol = 1e-5
+        end
+    end
+
+    # step-range view as the destination: skipped slices stay untouched
+    dD8 = CUDACore.zeros(Float32, M, N, 8)
+    A4 = rand(Float32, M, K, 4)
+    dA4 = CuArray(A4)
+    matmul!(view(dD8, :, :, 1:2:8), dA4, dB)
+    D8 = Array(dD8)
+    for (i, b) in enumerate(1:2:8)
+        @test D8[:, :, b] ≈ Float32.(Float64.(A4[:, :, i]) * Float64.(B[:, :, i])) rtol = 1e-5
+    end
+    @test all(iszero, D8[:, :, 2:2:8])
+
+    # row-stepped views break column-major storage and must be rejected
+    P = CuArray(rand(Float32, 2M, K))
+    @test_throws ArgumentError matmul!(CUDACore.zeros(Float32, M, N),
+                                       view(P, 1:2:2M, :), CuArray(B[:, :, 1]))
+end
+
+@testset "batched composition" begin
+    # batching × transA kwarg × C ≠ D × device α/β in one call
+    M, N, K, batch = 16, 24, 32, 3
+    A = rand(Float32, K, M, batch)
+    B, C = rand(Float32, K, N, batch), rand(Float32, M, N, batch)
+    dA, dB, dC = CuArray.((A, B, C))
+    dD = CUDACore.zeros(Float32, M, N, batch)
+
+    matmul!(dD, dA, dB; transA = 'T', C = dC,
+            α = device_scalar(2.0f0), β = device_scalar(0.5f0))
+    D = Array(dD)
+    for b in 1:batch
+        @test D[:, :, b] ≈ matmul_ref(A[:, :, b], B[:, :, b], 'T', 'N', 2, 0.5, C[:, :, b]) rtol = 1e-5
+    end
+end
+
 @testset "planless with misaligned views" begin
     # a row-offset view is only element-aligned; the derived plan must promise
     # the heuristic that reduced alignment, not the 256-byte pool default

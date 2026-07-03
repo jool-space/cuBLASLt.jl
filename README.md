@@ -22,6 +22,7 @@ using cuBLASLt: MatmulPlan, plan_matmul, matmul!
 # planless: derives a plan from the arguments and hits the plan cache
 matmul!(D, A, B; compute = :tf32)
 matmul!(D, transpose(A), B)         # orientation from Transpose/Adjoint wrappers
+matmul!(D3, PermutedDimsArray(A3, (2, 1, 3)), B3)   # batched transpose, 3-d arrays
 
 # planned: build once from prototype arguments — the same signature the plan
 # is applied with — then apply; plans are callable
@@ -36,5 +37,3 @@ plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
                   scale_modeA = :vec32_ue8m0, scale_modeB = :vec32_ue8m0)
 plan(D, A, B; scaleA = sA, scaleB = sB)
 ```
-
-See `SPEC.md` for the design document.

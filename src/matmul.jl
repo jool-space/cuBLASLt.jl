@@ -41,11 +41,20 @@ $(symbol_list(SCALE_MODES))).
 """
 scale_mode(x) = :none
 
-# operand orientation from LinearAlgebra wrappers; anything raw is 'N': the
-# stored matrix, trusted
+# operand orientation from wrapper types; anything raw is 'N': the stored
+# matrix, trusted. PermutedDimsArray carries its permutation as a type
+# parameter, so a swap of the first two dims is the (only) Base spelling of a
+# batched transpose — it never conjugates, so it never means 'C'.
 unwrap_op(x) = 'N', x
 unwrap_op(x::Transpose) = 'T', parent(x)
 unwrap_op(x::Adjoint) = 'C', parent(x)
+unwrap_op(x::PermutedDimsArray{<:Any,2,(1,2)}) = 'N', parent(x)
+unwrap_op(x::PermutedDimsArray{<:Any,2,(2,1)}) = 'T', parent(x)
+unwrap_op(x::PermutedDimsArray{<:Any,3,(1,2,3)}) = 'N', parent(x)
+unwrap_op(x::PermutedDimsArray{<:Any,3,(2,1,3)}) = 'T', parent(x)
+unwrap_op(::PermutedDimsArray{<:Any,N,perm}) where {N,perm} = throw(ArgumentError(
+    "unsupported PermutedDimsArray permutation $perm; supported are (1,2)/(1,2,3) " *
+    "(identity, 'N') and (2,1)/(2,1,3) (transposed storage, 'T')"))
 
 # alignment class of a device pointer, capped at cuBLASLt's 256-byte default
 ptr_alignment(p::CuPtr{Cvoid}) = 1 << min(8, trailing_zeros(UInt(p)))
@@ -112,6 +121,12 @@ function derived_plan_kwargs(D, A, B, α, β, C, scaleA, scaleB, workspace, kws)
     (size(dataC, 1), size(dataC, 2)) == (m, n) || throw(DimensionMismatch(
         "C must be $m×$n like D; got $(join(size(dataC), "×"))"))
 
+    for (name, x) in ((:A, dataA), (:B, dataB), (:C, dataC), (:D, dataD))
+        stride(x, 1) == 1 || throw(ArgumentError(
+            "$name has stride $(stride(x, 1)) in dimension 1; cuBLASLt layouts " *
+            "are column-major and need unit stride within a column"))
+    end
+
     pointer_mode =
         α isa Number && β isa Number ? :host :
         α isa CuArray{<:Any,0} && β isa CuArray{<:Any,0} ? :device :
@@ -156,7 +171,10 @@ counterpart is derived from:
 
   - shapes, element types, leading dimensions, batching, and pointer
     alignments come from the arrays (via [`cuBLASLt.ltdata`](@ref));
-  - `Transpose`/`Adjoint` wrappers on `A`/`B` set `transA`/`transB`;
+  - `Transpose`/`Adjoint` wrappers on `A`/`B` set `transA`/`transB`, as does
+    `PermutedDimsArray` with the first two dims swapped — `(2,1)` or, for a
+    batched transpose, `(2,1,3)` — which sets `'T'` (identity permutations
+    are accepted as `'N'`; anything else throws);
   - the types of `α`/`β` set `pointer_mode` (`Number`s → `:host`,
     0-dimensional `CuArray`s → `:device`);
   - `scaleA`/`scaleB` arrays (or scales carried by the operands, see
@@ -182,9 +200,10 @@ end
 # a raw operand is trusted as the stored matrix; a wrapped one is unwrapped
 # and must agree with the plan's orientation
 apply_operand(x, trans::Char, name::Symbol) = x
-function apply_operand(x::Union{Transpose,Adjoint}, trans::Char, name::Symbol)
+function apply_operand(x::Union{Transpose,Adjoint,PermutedDimsArray}, trans::Char, name::Symbol)
     w, p = unwrap_op(x)
-    w == trans || throw(ArgumentError(
+    # 'N' wrappers (identity perms) are as trusted as raw arrays
+    w == 'N' || w == trans || throw(ArgumentError(
         "operand $name is a $(nameof(typeof(x))) but the plan has trans$name = '$trans'"))
     return p
 end
@@ -196,9 +215,9 @@ end
 Compute `D = α ⋅ op(A) ⋅ op(B) + β ⋅ C` according to `plan`, in place.
 
 Operands are anything [`cuBLASLt.ltdata`](@ref)/[`cuBLASLt.ltptr`](@ref)
-accept; `Transpose`/`Adjoint` wrappers on `A`/`B` are unwrapped and checked
-against the plan's orientation, raw arrays are trusted as the stored
-matrices. `α`/`β` are host `Number`s (`pointer_mode = :host`) or
+accept; `Transpose`/`Adjoint`/`PermutedDimsArray` wrappers on `A`/`B` are
+unwrapped and checked against the plan's orientation, raw arrays (and
+identity permutations) are trusted as the stored matrices. `α`/`β` are host `Number`s (`pointer_mode = :host`) or
 0-dimensional `CuArray`s (`pointer_mode = :device`). `scaleA`/`scaleB` are
 device scale arrays, required iff the plan's corresponding scale mode is not
 `:none` and the operand does not carry its own (see
