@@ -11,3 +11,4 @@ cuBLASLt = "448fee3d-7d89-4b6e-8554-2e2b5f03afa7"
 
 [compat]
 ParallelTestRunner = "2.6.0"
+cuBLAS = "6.2.0"
