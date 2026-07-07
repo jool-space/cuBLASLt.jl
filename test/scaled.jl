@@ -101,20 +101,29 @@ end
         @info "skipping MXFP8 output (requires CC ≥ 10.0 and cuBLASLt ≥ 12.9; " *
               "device is $CC, library $(cuBLASLt.version()))"
     else
-        # Kernel-computed UE8M0 block scales for an FP8 D. Verification is a
-        # round trip: what Lt writes (payload + swizzled out-scales) is exactly
-        # what Lt reads back as a block-scaled operand, so feed D₁ + its
-        # out-scales into a second matmul as B and compare against Float64.
+        # Kernel-computed UE8M0 block scales for an FP8 D. The library only
+        # supports MX output scales inside an MX matmul — unscaled FP8 inputs
+        # with a block-scaled output fail the heuristic with INVALID_VALUE
+        # (observed on GB10, CUDA 13; NVIDIA's LtMxfp8Matmul sample likewise
+        # block-scales A and B) — so the inputs carry unit MX scales, which
+        # leave the product unchanged. Verification is a round trip: what Lt
+        # writes (payload + swizzled out-scales) is exactly what Lt reads back
+        # as a block-scaled operand, so feed D₁ + its out-scales into a second
+        # matmul as B and compare against Float64.
         A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
         dD1 = CUDACore.zeros(Float8_E4M3FN, M, N)
         dC = CUDACore.zeros(Float16, M, N)
+        sA1 = block_scales(0x7f, M, K ÷ 32)  # E8M0 1.0
+        sB1 = block_scales(0x7f, N, K ÷ 32)
         # sized like the scales of a K=M operand-B (outer = N, inner = M ÷ 32)
         out_sD = fill!(CuArray{UInt8}(undef, 128 * cld(N, 128) * 4 * cld(M ÷ 32, 4)), 0x00)
         plan1 = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
                            typeD = Float8_E4M3FN, typeC = Float16,
                            transA = 'T', lda = K, ldb = K,
+                           scale_modeA = :vec32_ue8m0, scale_modeB = :vec32_ue8m0,
                            out_scale_modeD = :vec32_ue8m0)
-        plan1(dD1, CuArray(A), CuArray(B); C = dC, out_scaleD = out_sD)
+        plan1(dD1, CuArray(A), CuArray(B); C = dC, scaleA = sA1, scaleB = sB1,
+              out_scaleD = out_sD)
         ref1 = Float64.(A)' * Float64.(B)
 
         # second matmul: E = 1ᵀ ⋅ D₁ (column sums), D₁ as the vec32-scaled B

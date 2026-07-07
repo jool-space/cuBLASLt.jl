@@ -59,7 +59,9 @@ The type parameter is the element type of `α`/`β` (`Float32`, or `Float16`/
     the D output (quantization scale); `scaleC`/`scaleD` are apply-time.
   - `out_scale_modeD`: block-scale mode of the *kernel-computed output scales*
     (MXFP8/NVFP4 output); the `out_scaleD` array they are written to is
-    apply-time. Requires cuBLASLt ≥ 12.9.
+    apply-time. Requires cuBLASLt ≥ 12.9, and only supported inside a
+    block-scaled matmul (A/B in matching block modes) — the heuristic rejects
+    it on unscaled or tensor-wide-scaled inputs.
   - `fast_accum = false`: FP8 fast accumulation.
   - `max_workspace = 32 << 20`: workspace-size ceiling for the heuristic; the
     chosen algorithm's actual requirement is stored as `plan.workspace_size`.
