@@ -10,4 +10,5 @@ cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
 cuBLASLt = "448fee3d-7d89-4b6e-8554-2e2b5f03afa7"
 
 [compat]
+Microfloats = "0.2.2"
 ParallelTestRunner = "2.6.0"
