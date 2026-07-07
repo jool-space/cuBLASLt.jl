@@ -42,7 +42,25 @@ The type parameter is the element type of `α`/`β` (`Float32`, or `Float16`/
     the corresponding operand pointer is guaranteed to have at call time, as a
     power of two. Alignment gates algorithm validity — pass the true alignment
     when operands will be views into larger arrays.
-  - `epilogue`: reserved for v0.2; must be `nothing`.
+  - `epilogue = :none`: fused epilogue, one of $(symbol_list(EPILOGUES)).
+    Forward: `D = act(α ⋅ op(A) ⋅ op(B) + β ⋅ C + bias)`, with `*_aux` variants
+    stashing the activation input (GELU: values; ReLU: a sign bit-mask) for the
+    backward pass. Backward: `:drelu`/`:dgelu` multiply the matmul result
+    elementwise by `act′(aux)`; the `*_bgrad` variants additionally reduce the
+    result into a bias-gradient vector, and `:bgrada`/`:bgradb` reduce operand
+    A/B over K into one. The `bias`/`bgrad`/`aux` *pointers* are apply-time
+    arguments.
+  - `bias_type`: element type of the bias/bgrad vector (defaults to cuBLASLt's
+    rule: D's type, or BF16/FP16 for FP8 matmuls).
+  - `aux_type`, `aux_ld`, `aux_stride`: aux-buffer element type (GELU only),
+    leading dimension (elements; *bits* for the ReLU bit-mask, divisible by
+    128), and batch stride.
+  - `scale_modeC`, `scale_modeD`: like `scale_modeA/B`, for the C input and
+    the D output (quantization scale); `scaleC`/`scaleD` are apply-time.
+  - `out_scale_modeD`: block-scale mode of the *kernel-computed output scales*
+    (MXFP8/NVFP4 output); the `out_scaleD` array they are written to is
+    apply-time. Requires cuBLASLt ≥ 12.9.
+  - `fast_accum = false`: FP8 fast accumulation.
   - `max_workspace = 32 << 20`: workspace-size ceiling for the heuristic; the
     chosen algorithm's actual requirement is stored as `plan.workspace_size`.
 """
@@ -67,13 +85,18 @@ mutable struct MatmulPlan{T}
     const compute::Symbol
     const scale_modeA::Symbol
     const scale_modeB::Symbol
+    const scale_modeC::Symbol
+    const scale_modeD::Symbol
+    const out_scale_modeD::Symbol
+    const epilogue::Symbol
+    const fast_accum::Bool
     const pointer_mode::Symbol
     const alignA::Int
     const alignB::Int
     const alignC::Int
     const alignD::Int
-    # guards call-time descriptor mutation (scale pointers); taken only when a
-    # scale mode is active
+    # guards call-time descriptor mutation (scale/bias/aux/amax pointers);
+    # taken only when the plan has apply-time descriptor writes
     const lock::ReentrantLock
 end
 
@@ -86,7 +109,13 @@ function unsafe_destroy!(plan::MatmulPlan)
     return nothing
 end
 
-function MatmulPlan(;
+MatmulPlan(; kwargs...) = only(matmul_plans(1; kwargs...))
+
+# Shared builder behind `MatmulPlan` (count = 1) and `plan_candidates`: one
+# heuristic query asking for `count` algorithms, one plan per result. Each
+# plan owns its descriptor + layouts (they are destroyed per-plan by the
+# finalizer), so the descriptor construction repeats per candidate.
+function matmul_plans(count::Integer;
         M::Integer, N::Integer, K::Integer,
         typeA, typeB, typeD, typeC = typeD,
         transA::Char = 'N', transB::Char = 'N',
@@ -100,13 +129,17 @@ function MatmulPlan(;
         strideD::Integer = ldd * N,
         compute::Symbol = :f32,
         scale_modeA::Symbol = :none, scale_modeB::Symbol = :none,
+        scale_modeC::Symbol = :none, scale_modeD::Symbol = :none,
+        out_scale_modeD::Symbol = :none,
+        epilogue::Symbol = :none,
+        bias_type = nothing, bias_stride = nothing,
+        aux_type = nothing, aux_ld = nothing, aux_stride = nothing,
+        fast_accum::Bool = false,
         pointer_mode::Symbol = :host,
         alignA::Integer = 256, alignB::Integer = 256,
         alignC::Integer = 256, alignD::Integer = 256,
-        epilogue = nothing,
         max_workspace::Integer = DEFAULT_MAX_WORKSPACE)
-    epilogue === nothing ||
-        throw(ArgumentError("epilogues are reserved for v0.2; pass epilogue = nothing"))
+    count >= 1 || throw(ArgumentError("invalid candidate count $count"))
     M >= 1 && N >= 1 && K >= 1 ||
         throw(DimensionMismatch("invalid shape M=$M, N=$N, K=$K"))
     batch >= 1 || throw(DimensionMismatch("invalid batch count $batch"))
@@ -118,10 +151,22 @@ function MatmulPlan(;
             "$name must be a power of two (bytes), got $align"))
     end
 
+    # the operand-reducing epilogues need K-major storage of the reduced
+    # operand; cuBLASLt only reports this at launch (NOT_SUPPORTED), so catch
+    # it at plan time
+    epilogue === :bgrada && transA != 'N' && throw(ArgumentError(
+        "epilogue :bgrada requires transA = 'N' (the K-reduction over stored A)"))
+    epilogue === :bgradb && transB != 'T' && throw(ArgumentError(
+        "epilogue :bgradb requires transB = 'T' (the K-reduction over stored B)"))
+
     opA, opB = operation(transA), operation(transB)
     ct = compute_type(compute)
     modeA, modeB = scale_mode_enum(scale_modeA), scale_mode_enum(scale_modeB)
-    check_feature_support(compute, scale_modeA, scale_modeB)
+    modeC, modeD = scale_mode_enum(scale_modeC), scale_mode_enum(scale_modeD)
+    out_modeD = scale_mode_enum(out_scale_modeD)
+    ep = epilogue_enum(epilogue)
+    check_feature_support(compute, scale_modeA, scale_modeB,
+                          scale_modeC, scale_modeD, out_scale_modeD)
 
     scaleT = scale_eltype(compute)
     dtA, dtB = to_datatype(typeA), to_datatype(typeB)
@@ -134,88 +179,124 @@ function MatmulPlan(;
     ldc >= M || throw(DimensionMismatch("ldc = $ldc < M = $M"))
     ldd >= M || throw(DimensionMismatch("ldd = $ldd < M = $M"))
 
+    # scale-pointer attributes whose mode is set must be non-NULL during the
+    # heuristic (cuBLASLt validates them there; NULL means "scale = 1", which
+    # only exists for tensor-wide scaling). The real pointers are apply-time
+    # arguments, so aim the descriptor at a throwaway buffer for the heuristic
+    # call; apply re-points the descriptor before every launch.
+    scale_ptr_attrs = Tuple(attr for (mode, attr) in (
+        (modeA, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER),
+        (modeB, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER),
+        (modeC, CUBLASLT_MATMUL_DESC_C_SCALE_POINTER),
+        (modeD, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER),
+        (out_modeD, CUBLASLT_MATMUL_DESC_D_OUT_SCALE_POINTER),
+    ) if mode !== nothing)
+
+    plans = MatmulPlan{scaleT}[]
+    results = cublasLtMatmulHeuristicResult_t[]
     descref = Ref(NULL_DESC)
     la, lb, lc, ld = Ref(NULL_LAYOUT), Ref(NULL_LAYOUT), Ref(NULL_LAYOUT), Ref(NULL_LAYOUT)
     prefref = Ref(NULL_PREF)
     try
-        cublasLtMatmulDescCreate(descref, ct, to_datatype(scaleT))
-        desc = descref[]
-        set_desc!(desc, CUBLASLT_MATMUL_DESC_TRANSA, opA)
-        set_desc!(desc, CUBLASLT_MATMUL_DESC_TRANSB, opB)
-        pointer_mode === :device &&
-            set_desc!(desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, CUBLASLT_POINTER_MODE_DEVICE)
-        # the scale-mode attribute only exists on ≥ 12.8; below that, only the
-        # implicit-default :scalar_f32 can be active (block modes threw above)
-        if version() >= v"12.8"
-            modeA === nothing || set_desc!(desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, modeA)
-            modeB === nothing || set_desc!(desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, modeB)
-        end
-
-        cublasLtMatrixLayoutCreate(la, dtA, UInt64(rowsA), UInt64(colsA), Int64(lda))
-        cublasLtMatrixLayoutCreate(lb, dtB, UInt64(rowsB), UInt64(colsB), Int64(ldb))
-        cublasLtMatrixLayoutCreate(lc, dtC, UInt64(M), UInt64(N), Int64(ldc))
-        cublasLtMatrixLayoutCreate(ld, dtD, UInt64(M), UInt64(N), Int64(ldd))
-        if batch > 1
-            for (l, stride) in ((la, strideA), (lb, strideB), (lc, strideC), (ld, strideD))
-                set_layout!(l[], CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, Cint(batch))
-                set_layout!(l[], CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, Int64(stride))
+        for i in 1:count
+            cublasLtMatmulDescCreate(descref, ct, to_datatype(scaleT))
+            desc = descref[]
+            set_desc!(desc, CUBLASLT_MATMUL_DESC_TRANSA, opA)
+            set_desc!(desc, CUBLASLT_MATMUL_DESC_TRANSB, opB)
+            pointer_mode === :device &&
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, CUBLASLT_POINTER_MODE_DEVICE)
+            # the scale-mode attributes only exist on ≥ 12.8; below that, only
+            # the implicit-default :scalar_f32 can be active (block modes threw
+            # in check_feature_support)
+            if version() >= v"12.8"
+                modeA === nothing || set_desc!(desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, modeA)
+                modeB === nothing || set_desc!(desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, modeB)
+                modeC === nothing || set_desc!(desc, CUBLASLT_MATMUL_DESC_C_SCALE_MODE, modeC)
+                modeD === nothing || set_desc!(desc, CUBLASLT_MATMUL_DESC_D_SCALE_MODE, modeD)
             end
-        end
+            out_modeD === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_D_OUT_SCALE_MODE, out_modeD)
+            ep === nothing || set_desc!(desc, CUBLASLT_MATMUL_DESC_EPILOGUE, ep)
+            fast_accum && set_desc!(desc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, Int8(1))
+            bias_type === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, to_datatype(bias_type))
+            bias_stride === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE, Int64(bias_stride))
+            aux_type === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE, to_datatype(aux_type))
+            aux_ld === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, Int64(aux_ld))
+            aux_stride === nothing ||
+                set_desc!(desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_BATCH_STRIDE, Int64(aux_stride))
 
-        cublasLtMatmulPreferenceCreate(prefref)
-        set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, Csize_t(max_workspace))
-        # the heuristic assumes 256-byte-aligned operands unless told otherwise;
-        # algorithms requiring more alignment than promised are filtered out here
-        set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, UInt32(alignA))
-        set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, UInt32(alignB))
-        set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, UInt32(alignC))
-        set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, UInt32(alignD))
-
-        res = Vector{cublasLtMatmulHeuristicResult_t}(undef, 1)
-        cnt = Ref{Cint}(0)
-        if modeA !== nothing || modeB !== nothing
-            # cuBLASLt validates scale modes at heuristic time: a block-scale
-            # mode whose scale pointer is still NULL is rejected with
-            # CUBLAS_STATUS_INVALID_VALUE (NULL means "scale = 1", which only
-            # exists for tensor-wide scaling). The real pointers are matmul!
-            # arguments, so aim the descriptor at a throwaway buffer for this
-            # one call; matmul! re-points the descriptor before every launch.
-            placeholder = CuArray{UInt8}(undef, 16)  # scale pointers must be 16B-aligned
-            modeA === nothing ||
-                set_desc!(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, ltptr(placeholder))
-            modeB === nothing ||
-                set_desc!(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, ltptr(placeholder))
-            GC.@preserve placeholder begin
-                cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
-                                               prefref[], Cint(1), res, cnt)
+            cublasLtMatrixLayoutCreate(la, dtA, UInt64(rowsA), UInt64(colsA), Int64(lda))
+            cublasLtMatrixLayoutCreate(lb, dtB, UInt64(rowsB), UInt64(colsB), Int64(ldb))
+            cublasLtMatrixLayoutCreate(lc, dtC, UInt64(M), UInt64(N), Int64(ldc))
+            cublasLtMatrixLayoutCreate(ld, dtD, UInt64(M), UInt64(N), Int64(ldd))
+            if batch > 1
+                for (l, stride) in ((la, strideA), (lb, strideB), (lc, strideC), (ld, strideD))
+                    set_layout!(l[], CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, Cint(batch))
+                    set_layout!(l[], CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, Int64(stride))
+                end
             end
-            modeA === nothing ||
-                set_desc!(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, CU_NULL)
-            modeB === nothing ||
-                set_desc!(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, CU_NULL)
-        else
-            cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
-                                           prefref[], Cint(1), res, cnt)
-        end
-        if cnt[] == 0 || res[1].state != CUBLAS_STATUS_SUCCESS
-            throw(ArgumentError(
-                "cuBLASLt found no algorithm for " *
-                config_string(M, N, K, batch, transA, transB, dtA, dtB, dtC, dtD,
-                              compute, scale_modeA, scale_modeB) *
-                ". This type/scale-mode combination is likely unsupported on " *
-                "$(CUDACore.name(CUDACore.device())) with cuBLASLt $(version())."))
-        end
 
-        plan = MatmulPlan{scaleT}(desc, la[], lb[], lc[], ld[],
-                                  res[1].algo, Int(res[1].workspaceSize),
-                                  M, N, K, batch, transA, transB,
-                                  dtA, dtB, dtC, dtD,
-                                  compute, scale_modeA, scale_modeB, pointer_mode,
-                                  Int(alignA), Int(alignB), Int(alignC), Int(alignD),
-                                  ReentrantLock())
-        descref[] = NULL_DESC  # ownership transferred; disarm the catch block
-        la[] = lb[] = lc[] = ld[] = NULL_LAYOUT
-        return finalizer(unsafe_destroy!, plan)
+            if i == 1
+                cublasLtMatmulPreferenceCreate(prefref)
+                set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, Csize_t(max_workspace))
+                # the heuristic assumes 256-byte-aligned operands unless told
+                # otherwise; algorithms requiring more than promised are filtered
+                set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, UInt32(alignA))
+                set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, UInt32(alignB))
+                set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, UInt32(alignC))
+                set_pref!(prefref[], CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, UInt32(alignD))
+
+                res = Vector{cublasLtMatmulHeuristicResult_t}(undef, count)
+                cnt = Ref{Cint}(0)
+                if isempty(scale_ptr_attrs)
+                    cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
+                                                   prefref[], Cint(count), res, cnt)
+                else
+                    placeholder = CuArray{UInt8}(undef, 16)  # scale pointers must be 16B-aligned
+                    for attr in scale_ptr_attrs
+                        set_desc!(desc, attr, ltptr(placeholder))
+                    end
+                    GC.@preserve placeholder begin
+                        cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
+                                                       prefref[], Cint(count), res, cnt)
+                    end
+                    for attr in scale_ptr_attrs
+                        set_desc!(desc, attr, CU_NULL)
+                    end
+                end
+                append!(results, (r for r in view(res, 1:Int(cnt[]))
+                                  if r.state == CUBLAS_STATUS_SUCCESS))
+                if isempty(results)
+                    throw(ArgumentError(
+                        "cuBLASLt found no algorithm for " *
+                        config_string(M, N, K, batch, transA, transB, dtA, dtB, dtC, dtD,
+                                      compute, scale_modeA, scale_modeB, scale_modeD,
+                                      out_scale_modeD, epilogue) *
+                        ". This configuration is likely unsupported on " *
+                        "$(CUDACore.name(CUDACore.device())) with cuBLASLt $(version())."))
+                end
+            end
+            i <= length(results) || break
+
+            plan = MatmulPlan{scaleT}(descref[], la[], lb[], lc[], ld[],
+                                      results[i].algo, Int(results[i].workspaceSize),
+                                      M, N, K, batch, transA, transB,
+                                      dtA, dtB, dtC, dtD,
+                                      compute, scale_modeA, scale_modeB,
+                                      scale_modeC, scale_modeD, out_scale_modeD,
+                                      epilogue, fast_accum, pointer_mode,
+                                      Int(alignA), Int(alignB), Int(alignC), Int(alignD),
+                                      ReentrantLock())
+            finalizer(unsafe_destroy!, plan)
+            push!(plans, plan)
+            descref[] = NULL_DESC  # ownership transferred; disarm the cleanup
+            la[] = lb[] = lc[] = ld[] = NULL_LAYOUT
+        end
+        return plans
     finally
         prefref[] == NULL_PREF || cublasLtMatmulPreferenceDestroy(prefref[])
         for l in (ld, lc, lb, la)
@@ -226,13 +307,17 @@ function MatmulPlan(;
 end
 
 function config_string(M, N, K, batch, transA, transB, dtA, dtB, dtC, dtD,
-                       compute, scale_modeA, scale_modeB)
+                       compute, scale_modeA, scale_modeB, scale_modeD,
+                       out_scale_modeD, epilogue)
     str = "$(M)×$(K)$(transA == 'N' ? "" : "ᵀ") ⋅ $(K)×$(N)$(transB == 'N' ? "" : "ᵀ")" *
           " → $(M)×$(N)"
     batch > 1 && (str *= " ×$batch")
     str *= " [$dtA ⋅ $dtB + $dtC → $dtD, compute $compute"
     scale_modeA === :none || (str *= ", A scales $scale_modeA")
     scale_modeB === :none || (str *= ", B scales $scale_modeB")
+    scale_modeD === :none || (str *= ", D scale $scale_modeD")
+    out_scale_modeD === :none || (str *= ", D out-scales $out_scale_modeD")
+    epilogue === :none || (str *= ", epilogue $epilogue")
     return str * "]"
 end
 
@@ -240,7 +325,9 @@ function Base.show(io::IO, plan::MatmulPlan)
     print(io, "MatmulPlan(",
           config_string(plan.M, plan.N, plan.K, plan.batch, plan.transA, plan.transB,
                         plan.typeA, plan.typeB, plan.typeC, plan.typeD,
-                        plan.compute, plan.scale_modeA, plan.scale_modeB))
+                        plan.compute, plan.scale_modeA, plan.scale_modeB,
+                        plan.scale_modeD, plan.out_scale_modeD, plan.epilogue))
     plan.pointer_mode === :device && print(io, ", device α/β")
+    plan.fast_accum && print(io, ", fast accum")
     print(io, ", workspace ", Base.format_bytes(plan.workspace_size), ")")
 end

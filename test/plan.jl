@@ -17,7 +17,7 @@ end
     @test_throws ArgumentError MatmulPlan(; kw..., scale_modeA = :vec42_bogus)
     @test_throws ArgumentError MatmulPlan(; kw..., transA = 'X')
     @test_throws ArgumentError MatmulPlan(; kw..., pointer_mode = :remote)
-    @test_throws ArgumentError MatmulPlan(; kw..., epilogue = :relu)
+    @test_throws ArgumentError MatmulPlan(; kw..., epilogue = :softmax)  # not fusable
     @test_throws ArgumentError MatmulPlan(; kw..., alignA = 3)  # not a power of two
     @test_throws DimensionMismatch MatmulPlan(; kw..., M = 0)
     @test_throws DimensionMismatch MatmulPlan(; kw..., lda = 1)  # < rows of stored A
@@ -121,4 +121,32 @@ end
     v = cuBLASLt.version()
     @test v isa VersionNumber
     @test v >= v"11"
+end
+
+@testset "plan_candidates" begin
+    M, N, K = 128, 128, 128
+    A, B = rand(Float32, M, K), rand(Float32, K, N)
+    dA, dB = CuArray.((A, B))
+    dD = CUDACore.zeros(Float32, M, N)
+    ref = Float64.(A) * Float64.(B)
+
+    plans = plan_candidates(dD, dA, dB; count = 4)
+    @test 1 <= length(plans) <= 4
+    for plan in plans  # every candidate is a complete, runnable plan
+        fill!(dD, 0)
+        plan(dD, dA, dB)
+        @test Array(dD) ≈ ref rtol = 1e-5
+    end
+
+    # kwargs-only form, no arrays needed to plan
+    plans2 = plan_candidates(; count = 3, M, N, K, typeA = Float32,
+                             typeB = Float32, typeD = Float32)
+    @test 1 <= length(plans2) <= 3
+    fill!(dD, 0)
+    plans2[end](dD, dA, dB)
+    @test Array(dD) ≈ ref rtol = 1e-5
+
+    @test_throws ArgumentError plan_candidates(; count = 0, M, N, K,
+                                               typeA = Float32, typeB = Float32,
+                                               typeD = Float32)
 end

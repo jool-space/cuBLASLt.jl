@@ -69,6 +69,68 @@ end
     @test !(res isa MatmulPlan)
 end
 
+@testset "fp8 output: scaleD + amaxD" begin
+    if CC < v"8.9"
+        @info "skipping FP8 output (requires CC ≥ 8.9, device is $CC)"
+    else
+        A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
+        # FP8 D with a Float16 C; scaleD is the quantization scale applied to
+        # D before the narrow store, amaxD receives the pre-scale absmax
+        plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                          typeD = Float8_E4M3FN, typeC = Float16,
+                          transA = 'T', lda = K, ldb = K,
+                          scale_modeD = :scalar_f32)
+        dD = CUDACore.zeros(Float8_E4M3FN, M, N)
+        dC = CUDACore.zeros(Float16, M, N)
+        sD = CuArray([0.125f0])
+        amax = CUDACore.zeros(Float32, 1)
+        plan(dD, CuArray(A), CuArray(B); C = dC, scaleD = sD, amaxD = amax)
+        ref = Float64.(A)' * Float64.(B)
+        @test Array(dD) ≈ 0.125 .* ref rtol = 0.1  # E4M3 quantization noise
+        @test only(Array(amax)) ≈ maximum(abs, ref) rtol = 1e-2
+
+        # planless: a length-1 Float32 scaleD prototype infers :scalar_f32
+        fill!(dD, 0)
+        matmul!(dD, CuArray(A), CuArray(B); transA = 'T', C = dC, scaleD = sD)
+        @test Array(dD) ≈ 0.125 .* ref rtol = 0.1
+    end
+end
+
+@testset "mxfp8 output: out_scaleD" begin
+    if CC < v"10.0" || cuBLASLt.version() < v"12.9"
+        @info "skipping MXFP8 output (requires CC ≥ 10.0 and cuBLASLt ≥ 12.9; " *
+              "device is $CC, library $(cuBLASLt.version()))"
+    else
+        # Kernel-computed UE8M0 block scales for an FP8 D. Verification is a
+        # round trip: what Lt writes (payload + swizzled out-scales) is exactly
+        # what Lt reads back as a block-scaled operand, so feed D₁ + its
+        # out-scales into a second matmul as B and compare against Float64.
+        A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
+        dD1 = CUDACore.zeros(Float8_E4M3FN, M, N)
+        dC = CUDACore.zeros(Float16, M, N)
+        # sized like the scales of a K=M operand-B (outer = N, inner = M ÷ 32)
+        out_sD = fill!(CuArray{UInt8}(undef, 128 * cld(N, 128) * 4 * cld(M ÷ 32, 4)), 0x00)
+        plan1 = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                           typeD = Float8_E4M3FN, typeC = Float16,
+                           transA = 'T', lda = K, ldb = K,
+                           out_scale_modeD = :vec32_ue8m0)
+        plan1(dD1, CuArray(A), CuArray(B); C = dC, out_scaleD = out_sD)
+        ref1 = Float64.(A)' * Float64.(B)
+
+        # second matmul: E = 1ᵀ ⋅ D₁ (column sums), D₁ as the vec32-scaled B
+        M2 = 32
+        ones8 = fill(Float8_E4M3FN(1), M, M2)
+        sA2 = block_scales(0x7f, M2, M ÷ 32)  # E8M0 1.0
+        dE = CUDACore.zeros(Float32, M2, N)
+        plan2 = MatmulPlan(; M = M2, N, K = M,
+                           typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                           typeD = Float32, transA = 'T', lda = M, ldb = M,
+                           scale_modeA = :vec32_ue8m0, scale_modeB = :vec32_ue8m0)
+        plan2(dE, CuArray(ones8), dD1; scaleA = sA2, scaleB = out_sD)
+        @test Array(dE) ≈ repeat(sum(ref1, dims = 1), M2) rtol = 0.05
+    end
+end
+
 @testset "mxfp8, :vec32_ue8m0" begin
     if CC < v"10.0"
         @info "skipping :vec32_ue8m0 MXFP8 (requires CC ≥ 10.0, device is $CC)"
