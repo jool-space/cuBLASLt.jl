@@ -6,14 +6,8 @@
 [![Coverage](https://codecov.io/gh/jool-space/cuBLASLt.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jool-space/cuBLASLt.jl)
 
 A developer-facing layer over the `cuBLAS` package's `libcublasLt` bindings.
-One operation — matmul — with every knob NVIDIA gives it, exposed as arguments
-instead of ambient state:
-
-```
-D = epilogue(α ⋅ op(A) ⋅ op(B) + β ⋅ C)
-```
-
-with per-call compute types (TF32 without `math_mode!`), block-scaled narrow
+Matrix multiplication, with every knob exposed as arguments.
+Per-call compute types (TF32 without `math_mode!`), block-scaled narrow
 types (MXFP8/MXFP4/NVFP4) on input *and* output, fused epilogues
 (bias/ReLU/GELU and their gradients), strided batching, and plan caching.
 
