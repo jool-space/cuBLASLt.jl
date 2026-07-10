@@ -13,12 +13,22 @@ The device pointer cuBLASLt reads an operand's storage through. Defaults to
 ltptr(x) = reinterpret(CuPtr{Cvoid}, pointer(x))
 
 """
+    cuBLASLt.ltstride(x, d) -> Integer
+
+The distance between adjacent elements along dimension `d`, in logical
+elements. Defaults to `stride(x, d)`. Packed-storage owners overload this
+when their logical element stride differs from their physical container.
+"""
+ltstride(x, d) = stride(x, d)
+
+"""
     cuBLASLt.ltdata(x) -> storage array
 
-The storage array behind an operand — the thing whose eltype, size, strides,
-and pointer describe what cuBLASLt reads. Identity by default; block-scaled
-container types overload this to hand over their payload without this package
-knowing their layout.
+The storage array behind an operand — the thing whose eltype and size describe
+what cuBLASLt reads. Identity by default; block-scaled container types overload
+this to hand over their payload without this package knowing their layout.
+Pointer and stride customization live in [`cuBLASLt.ltptr`](@ref) and
+[`cuBLASLt.ltstride`](@ref).
 """
 ltdata(x) = x
 
@@ -155,8 +165,8 @@ function derived_plan_kwargs(D, A, B, call, kws)
         "C must be $m×$n like D; got $(join(size(dataC), "×"))"))
 
     for (name, x) in ((:A, dataA), (:B, dataB), (:C, dataC), (:D, dataD))
-        stride(x, 1) == 1 || throw(ArgumentError(
-            "$name has stride $(stride(x, 1)) in dimension 1; cuBLASLt layouts " *
+        ltstride(x, 1) == 1 || throw(ArgumentError(
+            "$name has stride $(ltstride(x, 1)) in dimension 1; cuBLASLt layouts " *
             "are column-major and need unit stride within a column"))
     end
 
@@ -243,8 +253,8 @@ function derived_plan_kwargs(D, A, B, call, kws)
         typeA = eltype(dataA), typeB = eltype(dataB),
         typeC = eltype(dataC), typeD = eltype(dataD),
         transA, transB,
-        lda = max(1, stride(dataA, 2)), ldb = max(1, stride(dataB, 2)),
-        ldc = max(1, stride(dataC, 2)), ldd = max(1, stride(dataD, 2)),
+        lda = max(1, ltstride(dataA, 2)), ldb = max(1, ltstride(dataB, 2)),
+        ldc = max(1, ltstride(dataC, 2)), ldd = max(1, ltstride(dataD, 2)),
         batch,
         alignA = ptr_alignment(ltptr(dataA)), alignB = ptr_alignment(ltptr(dataB)),
         alignC = ptr_alignment(ltptr(dataC)), alignD = ptr_alignment(ltptr(dataD)),
@@ -252,8 +262,8 @@ function derived_plan_kwargs(D, A, B, call, kws)
         scale_modeA, scale_modeB, scale_modeC, scale_modeD, out_scale_modeD,
         max_workspace = workspace === nothing ? DEFAULT_MAX_WORKSPACE : sizeof(workspace))
     batch > 1 && (derived = (; derived...,
-        strideA = stride(dataA, 3), strideB = stride(dataB, 3),
-        strideC = stride(dataC, 3), strideD = stride(dataD, 3)))
+        strideA = ltstride(dataA, 3), strideB = ltstride(dataB, 3),
+        strideC = ltstride(dataC, 3), strideD = ltstride(dataD, 3)))
     return derived
 end
 
@@ -374,7 +384,8 @@ end
 
 Compute `D = α ⋅ op(A) ⋅ op(B) + β ⋅ C` according to `plan`, in place.
 
-Operands are anything [`cuBLASLt.ltdata`](@ref)/[`cuBLASLt.ltptr`](@ref)
+Operands are anything [`cuBLASLt.ltdata`](@ref)/[`cuBLASLt.ltptr`](@ref)/
+[`cuBLASLt.ltstride`](@ref)
 accept; `Transpose`/`Adjoint`/`PermutedDimsArray` wrappers on `A`/`B` are
 unwrapped and checked against the plan's orientation, raw arrays (and
 identity permutations) are trusted as the stored matrices. `α`/`β` are host `Number`s (`pointer_mode = :host`) or

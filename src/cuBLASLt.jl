@@ -64,7 +64,7 @@ using cuBLAS: cublasStatus_t, CUBLAS_STATUS_SUCCESS,
     cublasLtMatmulAlgoGetHeuristic, cublasLtMatmul
 
 public MatmulPlan, plan_matmul, matmul!, plan_candidates
-public handle, ltptr, ltdata, ltscale, scale_mode, activation_symbol,
+public handle, ltptr, ltstride, ltdata, ltscale, scale_mode, activation_symbol,
     version, empty_plan_cache!
 
 include("types.jl")

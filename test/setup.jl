@@ -1,6 +1,7 @@
 # Shared bindings loaded into every test worker via runtests.jl's `init_code`.
 using cuBLASLt
 using cuBLASLt: MatmulPlan, plan_matmul, matmul!, plan_candidates
+using BitPacking
 using CUDACore
 using cuBLAS: CUBLASError
 using LinearAlgebra
