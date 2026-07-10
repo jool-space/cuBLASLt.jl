@@ -12,13 +12,16 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
 
 [weakdeps]
+BitPacking = "b58c8408-13c4-4787-8733-7038ae624acf"
 Microfloats = "31c70f10-a750-4521-b13c-797315ae2933"
 NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
 
 [extensions]
+BitPackingExt = "BitPacking"
 NNlibExt = "NNlib"
 
 [compat]
+BitPacking = "0.2"
 CUDACore = "6.2.1"
 LinearAlgebra = "1"
 Microfloats = "0.2.3"
