@@ -1,5 +1,7 @@
 Random.seed!(3)
 
+using CUDACore: cudaDataType
+
 # Block-scaled and tensor-wide-scaled narrow-type matmuls. FP8/FP4 kernels
 # want the TN, K-major orientation: A stored K×M, B stored K×N, both with
 # leading dimension K.
