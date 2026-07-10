@@ -1,6 +1,6 @@
 name = "cuBLASLt"
 uuid = "448fee3d-7d89-4b6e-8554-2e2b5f03afa7"
-version = "0.1.0-DEV"
+version = "0.1.0"
 authors = ["AntonOresten <antonoresten@proton.me> and contributors"]
 
 [workspace]
