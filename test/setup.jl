@@ -2,26 +2,12 @@
 using cuBLASLt
 using cuBLASLt: MatmulPlan, plan_matmul, matmul!, plan_candidates
 using CUDACore
-using CUDACore: cudaDataType
 using cuBLAS: CUBLASError
 using LinearAlgebra
 using Microfloats
 using NNlib: NNlib
 using Random
 using Test
-
-# remove once https://github.com/JuliaGPU/CUDA.jl/pull/3180 gets merged
-for (T, n) in (
-    (:Float8_E4M3FN,  28),
-    (:Float8_E5M2,    29),
-    (:Float8_E8M0FNU, 30),
-    (:Float6_E2M3FN,  31),
-    (:Float6_E3M2FN,  32),
-    (:Float4_E2M1FN,  33),
-)
-    @eval Base.convert(::Type{CUDACore.cudaDataType}, ::Type{$T}) =
-        reinterpret(CUDACore.cudaDataType, Cint($n))
-end
 
 # CPU reference for D = α ⋅ op(A) ⋅ op(B) + β ⋅ C, in Float64
 op_ref(A, trans::Char) = trans == 'N' ? A : trans == 'T' ? transpose(A) : A'
