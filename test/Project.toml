@@ -13,6 +13,7 @@ cuBLASLt = "448fee3d-7d89-4b6e-8554-2e2b5f03afa7"
 [compat]
 BitPacking = "0.2"
 CUDACore = "6.2.1"
+NNlib = "0.9.38"
 ParallelTestRunner = "2"
 Microfloats = "0.2.3"
 cuBLAS = "6.2.1"
