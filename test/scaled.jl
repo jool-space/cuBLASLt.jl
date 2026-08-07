@@ -98,6 +98,38 @@ end
     end
 end
 
+@testset "fp8 output: fast_accum × amaxD" begin
+    if CC < v"8.9"
+        @info "skipping FP8 fast_accum (requires CC ≥ 8.9, device is $CC)"
+    else
+        A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
+        plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                          typeD = Float8_E4M3FN, typeC = Float16,
+                          transA = 'T', lda = K, ldb = K,
+                          scale_modeD = :scalar_f32, fast_accum = true)
+        dD = CUDACore.zeros(Float8_E4M3FN, M, N)
+        dC = CUDACore.zeros(Float16, M, N)
+        sD = CuArray([0.125f0])
+        # sentinel: distinguishes "kernel never wrote amax" from "wrote 0"
+        amax = CuArray([-1.0f0])
+        plan(dD, CuArray(A), CuArray(B); C = dC, scaleD = sD, amaxD = amax)
+        ref = Float64.(A)' * Float64.(B)
+        @test Array(dD) ≈ 0.125 .* ref rtol = 0.1
+        if CC < v"9"
+            # Ada quirk: the fast-accum FP8-output kernel plans and launches
+            # fine but writes amaxD = 0.0 — the sentinel is clobbered, so the
+            # reduction runs but the fast-accum path never feeds it (observed
+            # on RTX 6000 Ada, cuBLASLt 13.6). Anyone deriving a quantization
+            # scale from it would silently divide by zero. This test documents
+            # the behavior; if it starts failing, cuBLASLt fixed it and amaxD
+            # can be trusted alongside fast_accum here.
+            @test only(Array(amax)) == 0.0f0
+        else
+            @test only(Array(amax)) ≈ maximum(abs, ref) rtol = 1e-2
+        end
+    end
+end
+
 @testset "mxfp8 output: out_scaleD" begin
     if CC < v"10.0" || cuBLASLt.version() < v"12.9"
         @info "skipping MXFP8 output (requires CC ≥ 10.0 and cuBLASLt ≥ 12.9; " *
