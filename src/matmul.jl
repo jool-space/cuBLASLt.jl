@@ -425,9 +425,22 @@ device array the pre-quantization absmax of `D` is written to; `scaleC`
 dequantizes a narrow `C`.
 
 `workspace` is an optional preallocated buffer of at least
-`plan.workspace_size` bytes; by default one is allocated from the
-stream-ordered pool and freed right after the launch. **Under graph capture,
-always pass `workspace` explicitly** — the pool default is eager-safe only.
+`plan.workspace_size` bytes, owned by the caller: nothing is allocated, nothing
+is freed. By default one is allocated from the stream-ordered pool and freed
+right after the launch.
+
+**Under graph capture, always pass `workspace` explicitly.** The pool default
+allocates on every apply, and CUDA's allocator may synchronize to reclaim —
+illegal inside a capture. The plan is the seam that makes this easy: it knows
+its own `workspace_size` before any launch, so a caller carves that many bytes
+from wherever it keeps memory (an arena, a slab, a reused buffer) and hands
+them to the apply, which is then allocation-free.
+
+```julia
+plan = plan_matmul(D, A, B)
+ws = my_allocator(plan.workspace_size)
+plan(D, A, B; workspace = ws)     # no allocation, capture-safe
+```
 """
 function (plan::MatmulPlan{T})(D, A, B; α = true, β = false, C = D,
                                scaleA = nothing, scaleB = nothing,
@@ -463,6 +476,8 @@ function (plan::MatmulPlan{T})(D, A, B; α = true, β = false, C = D,
     dataC, dataD = ltdata(C), ltdata(D)
     check_alignment(plan, dataA, dataB, dataC, dataD)
 
+    # `ws_owned`: this apply allocated the workspace and must free it. A
+    # caller-supplied buffer is the caller's to reclaim.
     ws_owned = workspace === nothing
     ws = if ws_owned
         CuArray{UInt8}(undef, plan.workspace_size)
@@ -557,4 +572,41 @@ function matmul!(D, A, B; α = true, β = false, C = D,
     end
     return plan(D, A, B; α, β, C, scaleA, scaleB, scaleC, scaleD,
                 out_scaleD, amaxD, bias, bgrad, aux, workspace)
+end
+
+"""
+    matmul_supported(D, A, B; kws...) -> Bool
+
+Whether cuBLASLt can serve this [`matmul!`](@ref) — same signature, no launch.
+Value-returning: an unsupported configuration answers `false` rather than
+throwing, so a router can pick between cuBLASLt and a fallback without
+`try`/`catch`.
+
+The probe builds the plan and leaves it in the cache, so a `true` answer costs
+the following `matmul!` nothing, and a `false` answer is cached too (the
+heuristic query is not cheap, and "no algorithm exists" is a stable fact about
+this device and this library).
+
+Malformed arguments still throw: `false` means *cuBLASLt has no algorithm*, not
+*you called this wrong*.
+
+```julia
+matmul_supported(D, A, B; compute = :tf32) ? matmul!(D, A, B; compute = :tf32) :
+                                             mul!(D, A, B)
+```
+"""
+function matmul_supported(D, A, B; α = true, β = false, C = D,
+                          scaleA = nothing, scaleB = nothing,
+                          scaleC = nothing, scaleD = nothing, out_scaleD = nothing,
+                          amaxD = nothing, activation = nothing, bias = nothing,
+                          bgrad = nothing, aux = nothing, workspace = nothing,
+                          kws...)
+    call = (; α, β, C, scaleA, scaleB, scaleC, scaleD, out_scaleD,
+            activation, bias, bgrad, aux, workspace)
+    derived = derived_plan_kwargs(D, A, B, call, kws)
+    key = (CUDACore.device(), derived, values(kws))
+    entry = cached_entry(key) do
+        MatmulPlan(; derived..., kws...)
+    end
+    return entry isa MatmulPlan
 end

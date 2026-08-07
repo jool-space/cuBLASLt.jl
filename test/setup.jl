@@ -1,6 +1,6 @@
 # Shared bindings loaded into every test worker via runtests.jl's `init_code`.
 using cuBLASLt
-using cuBLASLt: MatmulPlan, plan_matmul, matmul!, plan_candidates
+using cuBLASLt: MatmulPlan, plan_matmul, matmul!, matmul_supported, plan_candidates
 using BitPacking
 using CUDACore
 using cuBLAS: CUBLASError
@@ -27,14 +27,14 @@ const CC = CUDACore.capability(CUDACore.device())
 
 # Build a plan, or return `nothing` when cuBLASLt has no algorithm for the
 # configuration on this GPU (arch-dependent compute-type support). The library
-# reports this either as an empty heuristic result (our ArgumentError) or as
-# CUBLAS_STATUS_NOT_SUPPORTED from the heuristic call itself. Narrow-type
+# reports this either as an empty heuristic result (our `UnsupportedConfigError`)
+# or as CUBLAS_STATUS_NOT_SUPPORTED from the heuristic call itself. Narrow-type
 # tests must not use this — they gate on `CC` and require the plan to build.
 function try_plan(; kwargs...)
     try
         return MatmulPlan(; kwargs...)
     catch err
-        err isa ArgumentError && occursin("no algorithm", err.msg) && return nothing
+        err isa cuBLASLt.UnsupportedConfigError && return nothing
         err isa CUBLASError && return nothing
         rethrow()
     end
