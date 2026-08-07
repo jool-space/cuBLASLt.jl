@@ -115,6 +115,38 @@ end
                                            CuArray(rand(Float32, K, N, batch + 1)))
 end
 
+@testset "batched orientation via NNlib wrappers" begin
+    M, N, K, batch = 16, 24, 32, 3
+    A = rand(Float32, K, M, batch)  # stored K-major; logical op(A) slice = Aᵀ
+    B = rand(Float32, K, N, batch)
+    dA, dB = CuArray(A), CuArray(B)
+    dD = CUDACore.zeros(Float32, M, N, batch)
+
+    matmul!(dD, NNlib.batched_transpose(dA), dB)
+    D = Array(dD)
+    for b in 1:batch
+        @test D[:, :, b] ≈ Float32.(Float64.(A[:, :, b])' * Float64.(B[:, :, b])) rtol = 1e-5
+    end
+
+    # planned round trip: the wrapper is a prototype too
+    plan = plan_matmul(dD, NNlib.batched_transpose(dA), dB)
+    @test plan.transA == 'T'
+    fill!(dD, 0)
+    plan(dD, NNlib.batched_transpose(dA), dB)
+    @test Array(dD) ≈ D rtol = 1e-5
+
+    # batched_adjoint is 'C' — same result for real element types
+    plan_c = plan_matmul(dD, NNlib.batched_adjoint(dA), dB)
+    @test plan_c.transA == 'C'
+    fill!(dD, 0)
+    plan_c(dD, NNlib.batched_adjoint(dA), dB)
+    @test Array(dD) ≈ D rtol = 1e-5
+
+    # a wrapper disagreeing with the plan's orientation is rejected at apply
+    plan_n = plan_matmul(dD, CuArray(permutedims(A, (2, 1, 3))), dB)
+    @test_throws ArgumentError plan_n(dD, NNlib.batched_transpose(dA), dB)
+end
+
 @testset "batched orientation via PermutedDimsArray" begin
     M, N, K, batch = 16, 24, 32, 3
     A = rand(Float32, K, M, batch)  # stored K-major; logical op(A) slice = Aᵀ
