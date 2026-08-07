@@ -85,6 +85,9 @@ end
 # matrix, trusted. PermutedDimsArray carries its permutation as a type
 # parameter, so a swap of the first two dims is the (only) Base spelling of a
 # batched transpose — it never conjugates, so it never means 'C'.
+# Extensions add methods for wrapper types this package doesn't know
+# (NNlibExt: `batched_transpose`/`batched_adjoint`); pair each with an
+# `apply_operand` method delegating to `checked_unwrap`.
 unwrap_op(x) = 'N', x
 unwrap_op(x::Transpose) = 'T', parent(x)
 unwrap_op(x::Adjoint) = 'C', parent(x)
@@ -282,7 +285,9 @@ counterpart is derived from:
   - `Transpose`/`Adjoint` wrappers on `A`/`B` set `transA`/`transB`, as does
     `PermutedDimsArray` with the first two dims swapped — `(2,1)` or, for a
     batched transpose, `(2,1,3)` — which sets `'T'` (identity permutations
-    are accepted as `'N'`; anything else throws);
+    are accepted as `'N'`; anything else throws). With the NNlib extension
+    loaded, `NNlib.batched_transpose` sets `'T'` and `NNlib.batched_adjoint`
+    `'C'` the same way;
   - the types of `α`/`β` set `pointer_mode` (`Number`s → `:host`,
     0-dimensional `CuArray`s → `:device`);
   - `scaleA`/`scaleB`/`scaleC`/`scaleD` arrays (or scales carried by the
@@ -342,7 +347,14 @@ plan_candidates(; count::Integer = 8, kws...) = matmul_plans(count; kws...)
 # a raw operand is trusted as the stored matrix; a wrapped one is unwrapped
 # and must agree with the plan's orientation
 apply_operand(x, trans::Char, name::Symbol) = x
-function apply_operand(x::Union{Transpose,Adjoint,PermutedDimsArray}, trans::Char, name::Symbol)
+apply_operand(x::Union{Transpose,Adjoint,PermutedDimsArray}, trans::Char, name::Symbol) =
+    checked_unwrap(x, trans, name)
+
+# the body every wrapper method of `apply_operand` delegates to. An extension
+# making a new orientation-wrapper type first-class defines `unwrap_op` on it
+# plus one `apply_operand` method calling this (NNlibExt does exactly that for
+# the batched wrappers).
+function checked_unwrap(x, trans::Char, name::Symbol)
     w, p = unwrap_op(x)
     # 'N' wrappers (identity perms) are as trusted as raw arrays
     w == 'N' || w == trans || throw(ArgumentError(
@@ -386,7 +398,8 @@ Compute `D = α ⋅ op(A) ⋅ op(B) + β ⋅ C` according to `plan`, in place.
 
 Operands are anything [`cuBLASLt.ltdata`](@ref)/[`cuBLASLt.ltptr`](@ref)/
 [`cuBLASLt.ltstride`](@ref)
-accept; `Transpose`/`Adjoint`/`PermutedDimsArray` wrappers on `A`/`B` are
+accept; `Transpose`/`Adjoint`/`PermutedDimsArray` wrappers on `A`/`B` (and
+NNlib's batched wrappers, with the NNlib extension loaded) are
 unwrapped and checked against the plan's orientation, raw arrays (and
 identity permutations) are trusted as the stored matrices. `α`/`β` are host `Number`s (`pointer_mode = :host`) or
 0-dimensional `CuArray`s (`pointer_mode = :device`). `scaleA`/`scaleB` are
