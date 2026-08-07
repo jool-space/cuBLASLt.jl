@@ -1,22 +1,49 @@
-# Plan cache: Dict-backed, keyed on (device, every-plan-kwarg), lock-protected,
-# bounded with wholesale eviction — deliberately dumb for v0.1. Exact-shape
-# keying: Lt heuristics are shape-dependent and pretending otherwise produces
-# silently bad algorithm choices.
+# Plan cache: a memoized *construction*, keyed exactly (device × every plan
+# kwarg), lock-protected. Exact-shape keying is deliberate: Lt heuristics are
+# shape-dependent and pretending otherwise produces silently bad algorithm
+# choices.
+#
+# Two properties worth stating, because both were once the other way round:
+#
+#   Unbounded. The cache holds one entry per distinct configuration the program
+#   actually runs — bounded in practice by the program's shape diversity, and a
+#   plan is a handful of host-side descriptors. The previous 256-entry bound
+#   evicted *wholesale* (`empty!`), so a workload with 257 live configurations
+#   thrashed permanently, rebuilding every plan on every call. A memo whose
+#   pathological case is worse than no memo is not a memo. `empty_plan_cache!`
+#   remains, for benchmarking hygiene.
+#
+#   Negative results are cached. An `UnsupportedConfigError` means "this device
+#   and this library have no algorithm for this configuration" — a stable fact
+#   about the world, reached only after a full (not cheap) heuristic query. A
+#   router that probes cuBLASLt and falls back elsewhere would otherwise re-pay
+#   that query on every call, forever. So the error is stored and rethrown on
+#   hit. (Argument errors are *not* cached: those say the caller spelled
+#   something wrong, and the answer can change with the next call's arguments.)
 
-const MAX_CACHED_PLANS = 256
-
-const plan_cache = Dict{Any,MatmulPlan}()
+const plan_cache = Dict{Any,Union{MatmulPlan,UnsupportedConfigError}}()
 const plan_cache_lock = ReentrantLock()
 
-function cached_plan(f, key)
+# Returns the cached plan, or the cached `UnsupportedConfigError` — the caller
+# decides whether an unsupported configuration throws (`cached_plan`) or routes
+# elsewhere (`matmul_supported`).
+function cached_entry(f, key)
     lock(plan_cache_lock) do
-        plan = get(plan_cache, key, nothing)
-        if plan === nothing
-            length(plan_cache) >= MAX_CACHED_PLANS && empty!(plan_cache)
-            plan = plan_cache[key] = f()
+        get!(plan_cache, key) do
+            try
+                f()
+            catch e
+                e isa UnsupportedConfigError || rethrow()
+                e
+            end
         end
-        return plan
     end
+end
+
+function cached_plan(f, key)
+    entry = cached_entry(f, key)
+    entry isa UnsupportedConfigError && throw(entry)
+    return entry::MatmulPlan
 end
 
 """

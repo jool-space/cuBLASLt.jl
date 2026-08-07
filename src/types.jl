@@ -1,5 +1,29 @@
 # symbol ↔ enum tables, and the version gates that go with them
 
+"""
+    cuBLASLt.UnsupportedConfigError
+
+The heuristic found no algorithm for a configuration: this device, this
+cuBLASLt, these types/shapes/modes. Distinct from an `ArgumentError` — those
+say a caller spelled something wrong, this one says the library cannot serve a
+well-formed request, which is a *routing* fact, not a bug.
+
+Consequently it is the one exception the plan cache memoizes (a negative
+result is as worth caching as a positive one; the heuristic query is not
+cheap), and the one [`cuBLASLt.matmul_supported`](@ref) answers `false` to
+instead of throwing.
+"""
+struct UnsupportedConfigError <: Exception
+    config::String
+    device::String
+    version::VersionNumber
+end
+
+Base.showerror(io::IO, e::UnsupportedConfigError) = print(io,
+    "cuBLASLt found no algorithm for ", e.config,
+    ". This configuration is likely unsupported on ", e.device,
+    " with cuBLASLt ", e.version, ".")
+
 const COMPUTE_TYPES = (;
     f32       = CUBLAS_COMPUTE_32F,
     tf32      = CUBLAS_COMPUTE_32F_FAST_TF32,

@@ -14,7 +14,8 @@ using CUDACore: CUDACore, CuArray, CuContext, CuPtr, CU_NULL, cudaDataType
 
 using LinearAlgebra: Adjoint, Transpose
 
-using cuBLAS: cublasStatus_t, CUBLAS_STATUS_SUCCESS,
+using cuBLAS: cublasStatus_t, CUBLAS_STATUS_SUCCESS, CUBLAS_STATUS_NOT_SUPPORTED,
+    CUBLASError,
     cublasOperation_t, CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C,
     cublasComputeType_t,
     CUBLAS_COMPUTE_32F, CUBLAS_COMPUTE_32F_FAST_TF32,
@@ -63,9 +64,9 @@ using cuBLAS: cublasStatus_t, CUBLAS_STATUS_SUCCESS,
     cublasLtMatmulAlgo_t, cublasLtMatmulHeuristicResult_t,
     cublasLtMatmulAlgoGetHeuristic, cublasLtMatmul
 
-public MatmulPlan, plan_matmul, matmul!, plan_candidates
+public MatmulPlan, plan_matmul, matmul!, matmul_supported, plan_candidates
 public handle, ltptr, ltstride, ltdata, ltscale, scale_mode, activation_symbol,
-    version, empty_plan_cache!
+    version, empty_plan_cache!, UnsupportedConfigError
 
 include("types.jl")
 include("handle.jl")

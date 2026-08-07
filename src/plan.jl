@@ -254,33 +254,41 @@ function matmul_plans(count::Integer;
 
                 res = Vector{cublasLtMatmulHeuristicResult_t}(undef, count)
                 cnt = Ref{Cint}(0)
-                if isempty(scale_ptr_attrs)
-                    cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
-                                                   prefref[], Cint(count), res, cnt)
-                else
-                    placeholder = CuArray{UInt8}(undef, 16)  # scale pointers must be 16B-aligned
-                    for attr in scale_ptr_attrs
-                        set_desc!(desc, attr, ltptr(placeholder))
-                    end
-                    GC.@preserve placeholder begin
+                # "cuBLASLt has no algorithm for this" arrives in two spellings:
+                # an empty (or all-failed) heuristic result, and NOT_SUPPORTED
+                # thrown by the heuristic call itself — which of the two you get
+                # depends on the configuration and the architecture. Both mean
+                # the same thing to a caller, so both become one exception.
+                unsupported() = UnsupportedConfigError(
+                    config_string(M, N, K, batch, transA, transB, dtA, dtB, dtC, dtD,
+                                  compute, scale_modeA, scale_modeB, scale_modeD,
+                                  out_scale_modeD, epilogue),
+                    CUDACore.name(CUDACore.device()), version())
+                try
+                    if isempty(scale_ptr_attrs)
                         cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
                                                        prefref[], Cint(count), res, cnt)
+                    else
+                        placeholder = CuArray{UInt8}(undef, 16)  # scale pointers must be 16B-aligned
+                        for attr in scale_ptr_attrs
+                            set_desc!(desc, attr, ltptr(placeholder))
+                        end
+                        GC.@preserve placeholder begin
+                            cublasLtMatmulAlgoGetHeuristic(handle(), desc, la[], lb[], lc[], ld[],
+                                                           prefref[], Cint(count), res, cnt)
+                        end
+                        for attr in scale_ptr_attrs
+                            set_desc!(desc, attr, CU_NULL)
+                        end
                     end
-                    for attr in scale_ptr_attrs
-                        set_desc!(desc, attr, CU_NULL)
-                    end
+                catch err
+                    err isa CUBLASError && err.code == CUBLAS_STATUS_NOT_SUPPORTED &&
+                        throw(unsupported())
+                    rethrow()
                 end
                 append!(results, (r for r in view(res, 1:Int(cnt[]))
                                   if r.state == CUBLAS_STATUS_SUCCESS))
-                if isempty(results)
-                    throw(ArgumentError(
-                        "cuBLASLt found no algorithm for " *
-                        config_string(M, N, K, batch, transA, transB, dtA, dtB, dtC, dtD,
-                                      compute, scale_modeA, scale_modeB, scale_modeD,
-                                      out_scale_modeD, epilogue) *
-                        ". This configuration is likely unsupported on " *
-                        "$(CUDACore.name(CUDACore.device())) with cuBLASLt $(version())."))
-                end
+                isempty(results) && throw(unsupported())
             end
             i <= length(results) || break
 
