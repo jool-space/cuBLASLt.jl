@@ -4,7 +4,7 @@ version = "0.1.2"
 authors = ["AntonOresten <antonoresten@proton.me> and contributors"]
 
 [workspace]
-projects = ["test"]
+projects = ["test", "docs"]
 
 [deps]
 CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
