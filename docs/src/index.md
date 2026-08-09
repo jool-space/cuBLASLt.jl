@@ -4,10 +4,20 @@ CurrentModule = cuBLASLt
 
 # cuBLASLt
 
-Documentation for [cuBLASLt](https://github.com/jool-space/cuBLASLt.jl).
+## Installation
+
+```julia
+using Pkg
+Registry.add(url="https://registry.jool.space")
+Pkg.add("cuBLASLt")
+```
+
+## Index
 
 ```@index
 ```
+
+## API
 
 ```@autodocs
 Modules = [cuBLASLt]
