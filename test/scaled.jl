@@ -212,13 +212,14 @@ end
     end
 end
 
-# The CC ≥ 9.0 claims below are provisional: sm_89 answers "no algorithm" for
-# both f32 modes (observed on RTX 6000 Ada, cuBLASLt 13.6), and no capable
-# device has confirmed them yet. If these fail on Hopper, tighten to 10.0.
+# Outer-vec is one of the 12.9 Hopper scaling schemes (channel-wide, VEC128,
+# BLK128x128), so it shares their Hopper-only gate: sm_89 and sm_121 (GB10)
+# both answer "no algorithm" for it (cuBLASLt 13.6), and sm_90 has yet to
+# confirm.
 
 @testset "fp8, :outer_vec_f32" begin
-    if CC < v"9.0"
-        @info "skipping :outer_vec_f32 FP8 (claimed CC ≥ 9.0, device is $CC)"
+    if !(v"9.0" <= CC < v"10.0")
+        @info "skipping :outer_vec_f32 FP8 (claimed Hopper only, device is $CC)"
     else
         A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
         plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
@@ -235,10 +236,16 @@ end
     end
 end
 
+# Per-batch scalar's support surface is undocumented: sm_89 and sm_121 (GB10)
+# both refuse this A/B-scaled f32-output config on cuBLASLt 13.6, leaving
+# datacenter Blackwell (sm_100/103) as the remaining claim. If a B200-class
+# device also refuses, the mode likely wants a different descriptor config
+# (e.g. an FP8 D) rather than a different arch.
+
 @testset "fp8, :per_batch_scalar_f32" begin
-    if CC < v"9.0" || cuBLASLt.version() < v"13.1"
-        @info "skipping :per_batch_scalar_f32 FP8 (claimed CC ≥ 9.0 and " *
-              "cuBLASLt ≥ 13.1; device is $CC, library $(cuBLASLt.version()))"
+    if !(v"10.0" <= CC < v"12.0") || cuBLASLt.version() < v"13.1"
+        @info "skipping :per_batch_scalar_f32 FP8 (claimed 10.0 ≤ CC < 12.0 " *
+              "and cuBLASLt ≥ 13.1; device is $CC, library $(cuBLASLt.version()))"
     else
         batch = 3
         A = Float8_E4M3FN.(rand(Float32, K, M, batch))
