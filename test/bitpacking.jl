@@ -16,6 +16,6 @@
     stepped = NarrowArray(@view parent(packed)[1:2:end, :, :])
     @test_throws ArgumentError cuBLASLt.ltstride(stepped, 1)
 
-    dpacked = Narrow{T}.(CuArray(fill(T(1), 16, 8)))
+    dpacked = Narrow(T).(CuArray(fill(T(1), 16, 8)))
     @test UInt(cuBLASLt.ltptr(dpacked)) == UInt(pointer(parent(dpacked)))
 end
