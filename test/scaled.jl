@@ -211,3 +211,51 @@ end
         @test Array(dD) ≈ fill(Float32(K), M, N)
     end
 end
+
+# The CC ≥ 9.0 claims below are provisional: sm_89 answers "no algorithm" for
+# both f32 modes (observed on RTX 6000 Ada, cuBLASLt 13.6), and no capable
+# device has confirmed them yet. If these fail on Hopper, tighten to 10.0.
+
+@testset "fp8, :outer_vec_f32" begin
+    if CC < v"9.0"
+        @info "skipping :outer_vec_f32 FP8 (claimed CC ≥ 9.0, device is $CC)"
+    else
+        A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
+        plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                          typeD = Float32, transA = 'T', lda = K, ldb = K,
+                          scale_modeA = :outer_vec_f32, scale_modeB = :outer_vec_f32)
+        dD = CUDACore.zeros(Float32, M, N)
+        # one f32 scale per outer element (M for A, N for B); the f32 modes
+        # read plain arrays, so non-constant scales need no swizzle machinery
+        sA = CuArray(rand(Float32, M) .+ 0.5f0)
+        sB = CuArray(rand(Float32, N) .+ 0.5f0)
+        plan(dD, CuArray(A), CuArray(B); scaleA = sA, scaleB = sB)
+        ref = Array(sA) .* (Float64.(A)' * Float64.(B)) .* Array(sB)'
+        @test Array(dD) ≈ ref rtol = 1e-3
+    end
+end
+
+@testset "fp8, :per_batch_scalar_f32" begin
+    if CC < v"9.0" || cuBLASLt.version() < v"13.1"
+        @info "skipping :per_batch_scalar_f32 FP8 (claimed CC ≥ 9.0 and " *
+              "cuBLASLt ≥ 13.1; device is $CC, library $(cuBLASLt.version()))"
+    else
+        batch = 3
+        A = Float8_E4M3FN.(rand(Float32, K, M, batch))
+        B = Float8_E4M3FN.(rand(Float32, K, N, batch))
+        dD = CUDACore.zeros(Float32, M, N, batch)
+        # one f32 scalar per batch entry; planless so the batch count and
+        # strides derive from the 3-dimensional prototypes
+        sA = CuArray(rand(Float32, batch) .+ 0.5f0)
+        sB = CuArray(rand(Float32, batch) .+ 0.5f0)
+        matmul!(dD, CuArray(A), CuArray(B); transA = 'T',
+                scaleA = sA, scaleB = sB,
+                scale_modeA = :per_batch_scalar_f32,
+                scale_modeB = :per_batch_scalar_f32)
+        hA, hB = Array(sA), Array(sB)
+        ref = stack(1:batch) do b
+            hA[b] * hB[b] * (Float64.(A[:, :, b])' * Float64.(B[:, :, b]))
+        end
+        @test Array(dD) ≈ ref rtol = 1e-3
+    end
+end

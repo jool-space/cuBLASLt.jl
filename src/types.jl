@@ -35,11 +35,13 @@ const COMPUTE_TYPES = (;
 )
 
 const SCALE_MODES = (;
-    scalar_f32     = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F,
-    vec32_ue8m0    = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0,
-    vec16_ue4m3    = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3,
-    vec128_f32     = CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F,
-    blk128x128_f32 = CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F,
+    scalar_f32           = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F,
+    vec32_ue8m0          = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0,
+    vec16_ue4m3          = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3,
+    outer_vec_f32        = CUBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F,
+    vec128_f32           = CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F,
+    blk128x128_f32       = CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F,
+    per_batch_scalar_f32 = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F,
 )
 
 const EPILOGUES = (;
@@ -139,8 +141,11 @@ function check_feature_support(compute::Symbol, scale_modeA::Symbol, scale_modeB
     for s in (scale_modeA, scale_modeB, scale_modeC, scale_modeD)
         # SCALAR_32F predates the scale-mode attribute (it is the implicit default
         # for FP8 scale pointers), so only block modes hard-require 12.8.
-        s in (:none, :scalar_f32) ||
+        if s === :per_batch_scalar_f32
+            require_version(v"13.1", "scale mode :per_batch_scalar_f32")
+        elseif !(s in (:none, :scalar_f32))
             require_version(v"12.8", "block scale mode :$s")
+        end
     end
     # the D_OUT_SCALE attributes (kernel-computed output block scales) are new
     out_scale_modeD === :none ||

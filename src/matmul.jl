@@ -122,8 +122,9 @@ operand_scale(x, explicit) = explicit === nothing ? ltscale(x) : explicit
 infer_scale_mode(name, ::Nothing) = :none
 infer_scale_mode(name, s::CuArray{Float32}) =
     length(s) == 1 ? :scalar_f32 : throw(ArgumentError(
-        "Float32 scales of length $(length(s)) are ambiguous " *
-        "(:vec128_f32 or :blk128x128_f32); pass scale_mode$name explicitly"))
+        "Float32 scales of length $(length(s)) are ambiguous (:outer_vec_f32, " *
+        ":vec128_f32, :blk128x128_f32, or :per_batch_scalar_f32); " *
+        "pass scale_mode$name explicitly"))
 infer_scale_mode(name, s) = throw(ArgumentError(
     "cannot infer a scale mode from a $(typeof(s)); pass scale_mode$name explicitly"))
 
