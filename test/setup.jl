@@ -19,10 +19,13 @@ matmul_ref(A, B, transA, transB, α, β, C) =
 device_scalar(x::T) where {T} = fill!(CuArray{T}(undef), x)
 
 # Architecture gates for narrow-type support (per the cuBLASLt docs):
-#   CC ≥ 8.9  — FP8 with tensor-wide scaling (implicit or :scalar_f32)
-#   CC ≥ 9.0  — :vec128_f32 / :blk128x128_f32 block scaling
-#   CC ≥ 10.0 — :vec32_ue8m0 MXFP8 and :vec16_ue4m3 NVFP4 block scaling
-# Tests skip below these thresholds and must plan + pass at or above them.
+#   CC ≥ 8.9         — FP8 with tensor-wide scaling (implicit or :scalar_f32)
+#   9.0 ≤ CC < 10.0  — the Hopper f32 schemes: :outer_vec_f32, :vec128_f32,
+#                      :blk128x128_f32
+#   CC ≥ 10.0        — :vec32_ue8m0 MXFP8 and :vec16_ue4m3 NVFP4 block scaling
+#   10.0 ≤ CC < 12.0 — :per_batch_scalar_f32 (claimed; support undocumented,
+#                      refused on sm_89 and sm_121)
+# Tests skip outside these ranges and must plan + pass inside them.
 const CC = CUDACore.capability(CUDACore.device())
 
 # Build a plan, or return `nothing` when cuBLASLt has no algorithm for the

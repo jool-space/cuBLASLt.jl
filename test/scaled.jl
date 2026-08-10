@@ -211,3 +211,58 @@ end
         @test Array(dD) ≈ fill(Float32(K), M, N)
     end
 end
+
+# Outer-vec is one of the 12.9 Hopper scaling schemes (channel-wide, VEC128,
+# BLK128x128), so it shares their Hopper-only gate: sm_89 and sm_121 (GB10)
+# both answer "no algorithm" for it (cuBLASLt 13.6), and sm_90 has yet to
+# confirm.
+
+@testset "fp8, :outer_vec_f32" begin
+    if !(v"9.0" <= CC < v"10.0")
+        @info "skipping :outer_vec_f32 FP8 (claimed Hopper only, device is $CC)"
+    else
+        A, B = fp8_operands(Float8_E4M3FN, Float8_E4M3FN)
+        plan = MatmulPlan(; M, N, K, typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                          typeD = Float32, transA = 'T', lda = K, ldb = K,
+                          scale_modeA = :outer_vec_f32, scale_modeB = :outer_vec_f32)
+        dD = CUDACore.zeros(Float32, M, N)
+        # one f32 scale per outer element (M for A, N for B); the f32 modes
+        # read plain arrays, so non-constant scales need no swizzle machinery
+        sA = CuArray(rand(Float32, M) .+ 0.5f0)
+        sB = CuArray(rand(Float32, N) .+ 0.5f0)
+        plan(dD, CuArray(A), CuArray(B); scaleA = sA, scaleB = sB)
+        ref = Array(sA) .* (Float64.(A)' * Float64.(B)) .* Array(sB)'
+        @test Array(dD) ≈ ref rtol = 1e-3
+    end
+end
+
+# Per-batch scalar's support surface is undocumented: sm_89 and sm_121 (GB10)
+# both refuse this A/B-scaled f32-output config on cuBLASLt 13.6, leaving
+# datacenter Blackwell (sm_100/103) as the remaining claim. If a B200-class
+# device also refuses, the mode likely wants a different descriptor config
+# (e.g. an FP8 D) rather than a different arch.
+
+@testset "fp8, :per_batch_scalar_f32" begin
+    if !(v"10.0" <= CC < v"12.0") || cuBLASLt.version() < v"13.1"
+        @info "skipping :per_batch_scalar_f32 FP8 (claimed 10.0 ≤ CC < 12.0 " *
+              "and cuBLASLt ≥ 13.1; device is $CC, library $(cuBLASLt.version()))"
+    else
+        batch = 3
+        A = Float8_E4M3FN.(rand(Float32, K, M, batch))
+        B = Float8_E4M3FN.(rand(Float32, K, N, batch))
+        dD = CUDACore.zeros(Float32, M, N, batch)
+        # one f32 scalar per batch entry; planless so the batch count and
+        # strides derive from the 3-dimensional prototypes
+        sA = CuArray(rand(Float32, batch) .+ 0.5f0)
+        sB = CuArray(rand(Float32, batch) .+ 0.5f0)
+        matmul!(dD, CuArray(A), CuArray(B); transA = 'T',
+                scaleA = sA, scaleB = sB,
+                scale_modeA = :per_batch_scalar_f32,
+                scale_modeB = :per_batch_scalar_f32)
+        hA, hB = Array(sA), Array(sB)
+        ref = stack(1:batch) do b
+            hA[b] * hB[b] * (Float64.(A[:, :, b])' * Float64.(B[:, :, b]))
+        end
+        @test Array(dD) ≈ ref rtol = 1e-3
+    end
+end
