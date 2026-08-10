@@ -12,6 +12,11 @@ The device pointer cuBLASLt reads an operand's storage through. Defaults to
 """
 ltptr(x) = reinterpret(CuPtr{Cvoid}, pointer(x))
 
+# Adjoint/Transpose only reorient strides; the storage pointer is the
+# parent's. Base's generic `pointer` fallback would route a device parent
+# through `unsafe_convert(Ptr, ...)`, which device memory refuses.
+ltptr(x::Union{Adjoint,Transpose}) = ltptr(parent(x))
+
 """
     cuBLASLt.ltstride(x, d) -> Integer
 

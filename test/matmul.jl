@@ -1,5 +1,14 @@
 Random.seed!(1)
 
+@testset "ltptr unwraps Adjoint/Transpose" begin
+    # scale arrays may arrive transpose-wrapped (e.g. outer-major :vec128_f32
+    # scales); the pointer is the parent's, and Base's generic fallback would
+    # illegally convert device memory to a host Ptr
+    dA = CUDACore.zeros(Float32, 4, 2)
+    @test cuBLASLt.ltptr(transpose(dA)) == cuBLASLt.ltptr(dA)
+    @test cuBLASLt.ltptr(dA') == cuBLASLt.ltptr(dA)
+end
+
 @testset "plain f32, all orientations" begin
     M, N, K = 48, 32, 64
     for transA in ('N', 'T'), transB in ('N', 'T')
