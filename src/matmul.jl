@@ -414,7 +414,12 @@ device scale arrays, required iff the plan's corresponding scale mode is not
 [`cuBLASLt.ltscale`](@ref)). For the block modes (`:vec32_ue8m0`,
 `:vec16_ue4m3`) cuBLASLt reads scales through its tiled layout of
 128(outer)×4(inner)-entry tiles: data must be swizzled accordingly and the
-allocation padded to whole tiles, or the kernel reads out of bounds.
+allocation padded to whole tiles, or the kernel reads out of bounds. The
+experimental `:vec32_mn_k4_ue8m0`/`:vec128_mn_k4_ue8m0` modes (A and B only)
+instead read a plain outer-major layout: one row of `⌈K/32⌉` (or `⌈K/128⌉`)
+UE8M0 scales per outer index (`M` for A, `N` for B), each row padded to a
+multiple of 4 and the rows padded to a multiple of 4 — in Julia terms a
+column-major `[block, outer]` matrix of size `(4⌈SFK/4⌉, 4⌈MN/4⌉)`.
 Epilogue arguments (mandatory iff the plan's epilogue uses them): `bias` is
 the input vector of length `M` for the forward `*_bias` epilogues; `bgrad`
 the *output* vector the gradient epilogues reduce into (length `M`, or `N`

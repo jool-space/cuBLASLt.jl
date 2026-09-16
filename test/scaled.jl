@@ -212,6 +212,58 @@ end
     end
 end
 
+# The experimental MN×K4 modes read a plain outer-major scale layout (no
+# swizzle), so unlike the tiled modes above they can be tested with
+# non-constant scales. Documented for A/B FP8 tensors on CC 10.x only; sm_121
+# (GB10) answers "no algorithm" for both (cuBLASLt 13.7), so the layout reading
+# here (from the 13.4 docs figure) awaits confirmation on sm_100/103.
+
+# E[block, outer] E8M0 bytes → the MN×K4 layout: blocks packed to a multiple
+# of 4, outer padded to a multiple of 4, zero-filled
+function mn_k4_scales(E::Matrix{UInt8})
+    nb, no = size(E)
+    S = zeros(UInt8, 4cld(nb, 4), 4cld(no, 4))
+    S[1:nb, 1:no] .= E
+    return CuArray(vec(S))
+end
+
+dequant_e8m0(X, E, blk) =
+    [Float64(X[k, j]) * 2.0^(Int(E[cld(k, blk), j]) - 127) for k in axes(X, 1), j in axes(X, 2)]
+
+for (mode, blk) in ((:vec32_mn_k4_ue8m0, 32), (:vec128_mn_k4_ue8m0, 128))
+    @testset "fp8, :$mode" begin
+        if !(v"10.0" <= CC < v"11.0") || cuBLASLt.version() < v"13.4"
+            @info "skipping :$mode FP8 (claimed 10.0 ≤ CC < 11.0 and cuBLASLt ≥ 13.4; " *
+                  "device is $CC, library $(cuBLASLt.version()))"
+        else
+            # outer and K both off the multiple-of-4 grid to exercise padding
+            m, n, k = 30, 17, 5blk + 3
+            A = Float8_E4M3FN.(rand(Float32, k, m))
+            B = Float8_E4M3FN.(rand(Float32, k, n))
+            EA = rand(UInt8(124):UInt8(130), cld(k, blk), m)  # 2^-3 … 2^3
+            EB = rand(UInt8(124):UInt8(130), cld(k, blk), n)
+            plan = MatmulPlan(; M = m, N = n, K = k,
+                              typeA = Float8_E4M3FN, typeB = Float8_E4M3FN,
+                              typeD = Float32, transA = 'T', lda = k, ldb = k,
+                              scale_modeA = mode, scale_modeB = mode)
+            dD = CUDACore.zeros(Float32, m, n)
+            plan(dD, CuArray(A), CuArray(B);
+                 scaleA = mn_k4_scales(EA), scaleB = mn_k4_scales(EB))
+            ref = dequant_e8m0(A, EA, blk)' * dequant_e8m0(B, EB, blk)
+            @test Array(dD) ≈ ref rtol = 1e-4
+        end
+    end
+end
+
+@testset "MN×K4 scale modes are A/B-only" begin
+    for kw in ((; scale_modeC = :vec32_mn_k4_ue8m0), (; scale_modeD = :vec128_mn_k4_ue8m0),
+               (; out_scale_modeD = :vec32_mn_k4_ue8m0))
+        @test_throws ArgumentError MatmulPlan(; M, N, K, typeA = Float8_E4M3FN,
+            typeB = Float8_E4M3FN, typeD = Float8_E4M3FN, transA = 'T', lda = K, ldb = K,
+            scale_modeA = :vec32_mn_k4_ue8m0, scale_modeB = :vec32_mn_k4_ue8m0, kw...)
+    end
+end
+
 # Outer-vec is one of the 12.9 Hopper scaling schemes (channel-wide, VEC128,
 # BLK128x128), so it shares their Hopper-only gate: sm_89 and sm_121 (GB10)
 # both answer "no algorithm" for it (cuBLASLt 13.6), and sm_90 has yet to
