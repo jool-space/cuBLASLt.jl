@@ -42,7 +42,12 @@ const SCALE_MODES = (;
     vec128_f32           = CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F,
     blk128x128_f32       = CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F,
     per_batch_scalar_f32 = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F,
+    vec32_mn_k4_ue8m0    = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_MN_K4_UE8M0,
+    vec128_mn_k4_ue8m0   = CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_MN_K4_UE8M0,
 )
+
+# the experimental MN×K4 layout (plain outer-major, no swizzle) is A/B-only
+const MN_K4_SCALE_MODES = (:vec32_mn_k4_ue8m0, :vec128_mn_k4_ue8m0)
 
 const EPILOGUES = (;
     relu          = CUBLASLT_EPILOGUE_RELU,
@@ -138,11 +143,17 @@ function check_feature_support(compute::Symbol, scale_modeA::Symbol, scale_modeB
                                scale_modeC::Symbol, scale_modeD::Symbol,
                                out_scale_modeD::Symbol)
     compute === :bf16x9 && require_version(v"12.9", "compute type :bf16x9 (BF16x9 FP32 emulation)")
+    for (name, s) in ((:C, scale_modeC), (:D, scale_modeD), (:out_D, out_scale_modeD))
+        s in MN_K4_SCALE_MODES && throw(ArgumentError(
+            "scale mode :$s applies to A and B only, not $name; use :vec32_ue8m0 there"))
+    end
     for s in (scale_modeA, scale_modeB, scale_modeC, scale_modeD)
         # SCALAR_32F predates the scale-mode attribute (it is the implicit default
         # for FP8 scale pointers), so only block modes hard-require 12.8.
         if s === :per_batch_scalar_f32
             require_version(v"13.1", "scale mode :per_batch_scalar_f32")
+        elseif s in MN_K4_SCALE_MODES
+            require_version(v"13.4", "scale mode :$s")
         elseif !(s in (:none, :scalar_f32))
             require_version(v"12.8", "block scale mode :$s")
         end
