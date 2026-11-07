@@ -25,6 +25,8 @@ device_scalar(x::T) where {T} = fill!(CuArray{T}(undef), x)
 #   CC ≥ 10.0        — :vec32_ue8m0 MXFP8 and :vec16_ue4m3 NVFP4 block scaling
 #   10.0 ≤ CC < 12.0 — :per_batch_scalar_f32 (claimed; support undocumented,
 #                      refused on sm_89 and sm_121)
+#   10.0 ≤ CC < 11.0 — the experimental MN×K4 modes :vec32_mn_k4_ue8m0 and
+#                      :vec128_mn_k4_ue8m0 (cuBLASLt ≥ 13.4)
 # Tests skip outside these ranges and must plan + pass inside them.
 const CC = CUDACore.capability(CUDACore.device())
 
